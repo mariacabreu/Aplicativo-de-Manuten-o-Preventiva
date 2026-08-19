@@ -38,10 +38,11 @@ const HomeScreen = ({ navigation, route }) => {
 
   // ----- Estado do Header (notificações + plano/veículos) -----
   const [notifications, setNotifications] = useState([]);
+  const [unreadCount, setUnreadCount] = useState(0);
   const [planType, setPlanType] = useState(loggedUser?.plan_type || null);
   const [vehicle, setVehicle] = useState(null); // Single vehicle
 
-  const unreadCount = notifications.filter((n) => !n.read).length;
+  const hasCriticalNotif = notifications.some((n) => !n.read && n.priority && String(n.priority).toLowerCase() === 'critical');
 
   useEffect(() => {
   console.log('loggedUser mudou:', loggedUser);
@@ -88,14 +89,38 @@ const HomeScreen = ({ navigation, route }) => {
     }
   };
 
-  const fetchNotifications = async () => {
+  const fetchNotifications = async (forceRefresh = false) => {
     try {
       const userId = loggedUser?.id || 1;
-      const res = await axios.get(`${API_BASE_URL}/user/notifications/${userId}`);
+      const url = forceRefresh
+        ? `${API_BASE_URL}/user/notifications/${userId}?refresh=1`
+        : `${API_BASE_URL}/user/notifications/${userId}`;
+      const res = await axios.get(url, { timeout: 30000 });
+
       const data = Array.isArray(res.data?.notifications) ? res.data.notifications : [];
       setNotifications(data);
+
+      const backendCount = typeof res.data?.unread_count === 'number' ? res.data.unread_count : null;
+      if (backendCount !== null && !Number.isNaN(backendCount)) {
+        setUnreadCount(backendCount);
+      } else {
+        setUnreadCount(data.filter((n) => !n.read).length);
+      }
     } catch (error) {
       console.error('Error fetching notifications:', error);
+      if (!forceRefresh && loggedUser?.id) {
+        try {
+          const fallbackRes = await axios.get(`${API_BASE_URL}/user/notifications/${loggedUser.id}?refresh=1`, { timeout: 15000 });
+          const fallbackData = Array.isArray(fallbackRes.data?.notifications) ? fallbackRes.data.notifications : [];
+          setNotifications(fallbackData);
+          const count = typeof fallbackRes.data?.unread_count === 'number'
+            ? fallbackRes.data.unread_count
+            : fallbackData.filter((n) => !n.read).length;
+          setUnreadCount(count);
+        } catch (e2) {
+          console.error('Fallback fetch também falhou:', e2);
+        }
+      }
     }
   };
 
@@ -202,8 +227,19 @@ const HomeScreen = ({ navigation, route }) => {
     ]);
   };
 
-  const markAllAsRead = () => {
-    setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+  const markAllAsRead = async () => {
+    if (!loggedUser?.id) return;
+    try {
+      setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+      setUnreadCount(0);
+      await axios.patch(
+        `${API_BASE_URL}/user/notifications/${loggedUser.id}/read-all`,
+        {},
+        { timeout: 15000 }
+      ).catch((e) => console.warn('mark-all-read endpoint error (segue com UI atualizada):', e?.message || e));
+    } catch (e) {
+      console.error('markAllAsRead failed:', e);
+    }
   };
 
   const handleAddVehicle = () => {

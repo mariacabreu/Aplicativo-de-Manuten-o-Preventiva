@@ -11,6 +11,12 @@ import ProfileModal from './ProfileModal';
  * abre o ProfileModal — ambos renderizados aqui dentro. Se quiser navegar
  * para uma tela em vez de abrir o modal, passe onLeftIconPress/onRightIconPress.
  */
+const hasValidCount = (count) => {
+  if (count === null || count === undefined || count === '') return false;
+  const n = Number(count);
+  return Number.isFinite(n) && n > 0;
+};
+
 const Header = ({
   logoSource = require('../../assets/logo.png'),
   onLeftIconPress,
@@ -33,10 +39,12 @@ const Header = ({
   showIcons = true,
   style,
   navigation,
-  loggedUser
+  loggedUser,
+  hasCritical = false
 }) => {
   const [notificationsVisible, setNotificationsVisible] = useState(false);
   const [profileVisible, setProfileVisible] = useState(false);
+  const safeCount = hasValidCount(notificationCount) ? Math.min(Number(notificationCount), 99) : 0;
 
   const handleLeftIconPress = () => {
     if (onLeftIconPress) {
@@ -54,14 +62,26 @@ const Header = ({
     setProfileVisible(true);
   };
 
+  const renderBellIcon = () => {
+    if (leftIcon) return leftIcon;
+    if (safeCount <= 0) {
+      return <Ionicons name="notifications-outline" size={26} color="#2C2C2C" />;
+    }
+    if (hasCritical) {
+      return <Ionicons name="notifications" size={26} color="#F44336" />;
+    }
+    return <Ionicons name="notifications" size={26} color="#2C2C2C" />;
+  };
+
   return (
     <View style={[styles.header, showIcons ? styles.headerWithIcons : styles.headerWithoutIcons, style]}>
       <NotificationsModal
         visible={notificationsVisible}
         onClose={() => setNotificationsVisible(false)}
         notifications={notifications}
-        unreadCount={notificationCount}
+        unreadCount={safeCount}
         onMarkAllAsRead={onMarkAllAsRead}
+        isPremium={isPremium}
       />
       <ProfileModal
         visible={profileVisible}
@@ -88,14 +108,17 @@ const Header = ({
             style={styles.iconButton}
             onPress={handleLeftIconPress}
             activeOpacity={0.7}
+            hitSlop={{ top: 10, right: 10, bottom: 10, left: 10 }}
           >
-            {leftIcon || (
-              <Ionicons name="notifications-outline" size={26} color="#2C2C2C" />
-            )}
-            {notificationCount > 0 && (
-              <View style={styles.badge}>
+            {renderBellIcon()}
+            {safeCount > 0 && (
+              <View style={[
+                styles.badge,
+                hasCritical && styles.badgeCritical,
+                safeCount > 9 && styles.badgeWide
+              ]}>
                 <Text style={styles.badgeText}>
-                  {notificationCount > 9 ? '9+' : notificationCount}
+                  {safeCount > 99 ? '99+' : safeCount > 9 ? '9+' : safeCount}
                 </Text>
               </View>
             )}
@@ -105,6 +128,7 @@ const Header = ({
             style={styles.iconButton}
             onPress={handleRightIconPress}
             activeOpacity={0.7}
+            hitSlop={{ top: 10, right: 10, bottom: 10, left: 10 }}
           >
             {rightIcon || (
               <View style={styles.avatarPlaceholder}>
@@ -151,26 +175,42 @@ const styles = StyleSheet.create({
   iconButton: {
     marginLeft: 18,
     position: 'relative',
-    overflow: 'visible'
+    overflow: 'visible',
+    padding: 4
   },
   badge: {
     position: 'absolute',
-    top: -4,
-    right: -6,
-    backgroundColor: '#FFCF00',
-    borderRadius: 9,
-    minWidth: 16,
-    height: 16,
-    paddingHorizontal: 3,
+    top: -2,
+    right: -8,
+    backgroundColor: '#F44336',
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
+    borderRadius: 10,
+    minWidth: 18,
+    height: 18,
+    paddingHorizontal: 4,
     alignItems: 'center',
     justifyContent: 'center',
-    zIndex: 10,
-    elevation: 10 
+    zIndex: 999,
+    elevation: 6,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.3,
+    shadowRadius: 2
+  },
+  badgeWide: {
+    minWidth: 22,
+    paddingHorizontal: 5
+  },
+  badgeCritical: {
+    backgroundColor: '#D32F2F'
   },
   badgeText: {
-    color: '#fff',
-    fontSize: 9,
-    fontWeight: 'bold'
+    color: '#FFFFFF',
+    fontSize: 10,
+    lineHeight: 12,
+    fontWeight: '900',
+    fontFamily: 'Inter, sans-serif'
   },
   avatarPlaceholder: {
     width: 34,

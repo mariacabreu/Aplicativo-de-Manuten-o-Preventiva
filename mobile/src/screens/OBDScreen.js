@@ -47,9 +47,10 @@ const DTC_DESCRIPTION_MAP = {
   P0420: 'Eficiência do catalisador abaixo do limite',
 };
 
+const NOT_AVAILABLE = 'N/D';
+
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Bluetooth is only available on Android, skip on web/iOS
 const BluetoothClassic = (() => {
   if (Platform.OS !== 'android') {
     return null;
@@ -76,6 +77,7 @@ const OBDScreen = ({ navigation, route }) => {
   const intervalRef = useRef(null);
   const connectionRef = useRef(null);
   const commandQueueRef = useRef(Promise.resolve());
+  const supportedPidsRef = useRef(new Set());
   const [alertModalVisible, setAlertModalVisible] = useState(false);
   const [alertModalData, setAlertModalData] = useState({
     type: 'info',
@@ -88,27 +90,29 @@ const OBDScreen = ({ navigation, route }) => {
   });
 
   const [liveData, setLiveData] = useState({
-    rpm: 0,
-    speed: 0,
-    coolantTemp: 0,
-    fuelLevel: 0,
-    batteryVoltage: 12.0,
-    engineLoad: 0,
-    airIntakeTemp: 0,
-    throttlePosition: 0,
-    fuelPressure: 0,
-    intakeManifoldPressure: 0,
-    oilTemp: 0,
-    oilPressure: 0,
-    lambda: 1.0,
-    maf: 0,
-    timingAdvance: 0,
-    egr: 0,
-    evapSystemVaporPressure: 0,
-    fuelTrimShort: 0,
-    fuelTrimLong: 0,
-    catalystTemp: 0,
-    ambientTemp: 0
+    rpm: NOT_AVAILABLE,
+    speed: NOT_AVAILABLE,
+    coolantTemp: NOT_AVAILABLE,
+    fuelLevel: NOT_AVAILABLE,
+    batteryVoltage: NOT_AVAILABLE,
+    engineLoad: NOT_AVAILABLE,
+    airIntakeTemp: NOT_AVAILABLE,
+    throttlePosition: NOT_AVAILABLE,
+    fuelPressure: NOT_AVAILABLE,
+    intakeManifoldPressure: NOT_AVAILABLE,
+    oilTemp: NOT_AVAILABLE,
+    oilPressure: NOT_AVAILABLE,
+    lambda: NOT_AVAILABLE,
+    maf: NOT_AVAILABLE,
+    timingAdvance: NOT_AVAILABLE,
+    egr: NOT_AVAILABLE,
+    evapSystemVaporPressure: NOT_AVAILABLE,
+    fuelTrimShort: NOT_AVAILABLE,
+    fuelTrimLong: NOT_AVAILABLE,
+    catalystTemp: NOT_AVAILABLE,
+    ambientTemp: NOT_AVAILABLE,
+    fuelEfficiency: NOT_AVAILABLE,
+    co2Emission: NOT_AVAILABLE
   });
   const [dtcCodes, setDtcCodes] = useState([]);
   const [isLoadingDTC, setIsLoadingDTC] = useState(false);
@@ -193,9 +197,7 @@ const OBDScreen = ({ navigation, route }) => {
 
   const extractResponseBytes = (response, expectedMode) => {
     const normalized = normalizeElmResponse(response).toUpperCase();
-    console.log('extractResponseBytes - normalized:', normalized);
     const compactHex = normalized.replace(/[^0-9A-F]/g, '');
-    console.log('extractResponseBytes - compactHex:', compactHex);
 
     if (compactHex.length < 2) {
       return null;
@@ -206,18 +208,13 @@ const OBDScreen = ({ navigation, route }) => {
       bytes.push(parseInt(compactHex.slice(index, index + 2), 16));
     }
 
-    console.log('extractResponseBytes - bytes:', bytes);
-
     if (bytes.length === 0) {
       return null;
     }
 
-    // Try to find expected mode, or default to first valid mode
     let responseStartIndex = bytes.findIndex((byte) => byte === expectedMode);
-    console.log('extractResponseBytes - responseStartIndex:', responseStartIndex);
-    
+
     if (responseStartIndex === -1) {
-      // If not found, check for common modes and use first available
       const commonModes = [0x41, 0x43, 0x42];
       for (const mode of commonModes) {
         const idx = bytes.findIndex((byte) => byte === mode);
@@ -229,7 +226,6 @@ const OBDScreen = ({ navigation, route }) => {
     }
 
     if (responseStartIndex === -1) {
-      // If still not found, just try using from index 0 if it's a reasonable length
       return bytes.length >= 2 ? bytes : null;
     }
 
@@ -266,8 +262,6 @@ const OBDScreen = ({ navigation, route }) => {
       return null;
     }
 
-    console.log('decodeDTCBytes - firstByte:', firstByte, 'secondByte:', secondByte);
-
     const system = DTC_SYSTEM_MAP[(firstByte & 0xC0) >> 6] || 'P';
     const code = [
       system,
@@ -277,8 +271,6 @@ const OBDScreen = ({ navigation, route }) => {
       (secondByte & 0x0F).toString(16).toUpperCase(),
     ].join('');
 
-    console.log('decodeDTCBytes - code:', code);
-
     return {
       code,
       description: DTC_DESCRIPTION_MAP[code] || getGenericDTCDescription(code),
@@ -287,15 +279,12 @@ const OBDScreen = ({ navigation, route }) => {
   };
 
   const parseDTCResponse = (response) => {
-    console.log('parseDTCResponse - response:', response);
     const bytes = extractResponseBytes(response, 0x43);
-    console.log('parseDTCResponse - bytes:', bytes);
     if (!bytes || bytes.length < 2) {
       return [];
     }
 
     const dtcPayload = bytes.slice(1);
-    console.log('parseDTCResponse - dtcPayload:', dtcPayload);
     if (dtcPayload.length === 0 || dtcPayload.every((byte) => byte === 0)) {
       return [];
     }
@@ -312,8 +301,54 @@ const OBDScreen = ({ navigation, route }) => {
       }
     }
 
-    console.log('parseDTCResponse - dtcList:', dtcList);
     return dtcList;
+  };
+
+  const isPidSupported = (pidHex) => {
+    return supportedPidsRef.current.has(pidHex.toUpperCase());
+  };
+
+  const parseSupportedPids = (bytes) => {
+    if (!bytes || bytes.length < 4) return;
+    const dataBytes = bytes.slice(2, 6);
+    const supported = new Set();
+    const pids01To20 = [
+      '0101','0102','0103','0104','0105','0106','0107','0108',
+      '0109','010A','010B','010C','010D','010E','010F','0110',
+      '0111','0112','0113','0114','0115','0116','0117','0118',
+      '0119','011A','011B','011C','011D','011E','011F','0120'
+    ];
+    const pids21To40 = [
+      '0121','0122','0123','0124','0125','0126','0127','0128',
+      '0129','012A','012B','012C','012D','012E','012F','0130',
+      '0131','0132','0133','0134','0135','0136','0137','0138',
+      '0139','013A','013B','013C','013D','013E','013F','0140'
+    ];
+    const pids41To60 = [
+      '0141','0142','0143','0144','0145','0146','0147','0148',
+      '0149','014A','014B','014C','014D','014E','014F','0150',
+      '0151','0152','0153','0154','0155','0156','0157','0158',
+      '0159','015A','015B','015C','015D','015E','015F','0160'
+    ];
+
+    let pidList;
+    const responsePid = bytes[1] ? bytes[1].toString(16).padStart(2, '0').toUpperCase() : '';
+    if (responsePid === '00') pidList = pids01To20;
+    else if (responsePid === '20') pidList = pids21To40;
+    else if (responsePid === '40') pidList = pids41To60;
+    else return;
+
+    let bitIndex = 0;
+    for (const byte of dataBytes) {
+      for (let bit = 7; bit >= 0; bit--) {
+        if (byte & (1 << bit)) {
+          const pidCode = pidList[bitIndex];
+          if (pidCode) supported.add(pidCode);
+        }
+        bitIndex++;
+      }
+    }
+    return supported;
   };
 
   const sendOBDCommand = async (command, options = {}) => {
@@ -323,7 +358,7 @@ const OBDScreen = ({ navigation, route }) => {
 
     const {
       clearBuffer = true,
-      waitAfterWriteMs = 250,
+      waitAfterWriteMs = 350,
       readAttempts = 3,
     } = options;
 
@@ -350,11 +385,10 @@ const OBDScreen = ({ navigation, route }) => {
             break;
           }
 
-          await delay(120);
+          await delay(180);
         }
 
         const cleanedResponse = normalizeElmResponse(response, normalizedCommand);
-        console.log(`Comando ${normalizedCommand} resposta:`, cleanedResponse || response);
         return cleanedResponse;
       } catch (err) {
         console.error(`Erro no comando ${normalizedCommand}:`, err);
@@ -372,14 +406,11 @@ const OBDScreen = ({ navigation, route }) => {
   };
 
   const parseOBDResponse = (response, expectedMode = 0x41) => {
-    console.log('parseOBDResponse - response:', response, 'expectedMode:', expectedMode);
     if (!response || response.includes('NO DATA') || response.includes('?')) {
-      console.log('parseOBDResponse - skipping (no data or ?)');
       return null;
     }
 
     const result = extractResponseBytes(response, expectedMode);
-    console.log('parseOBDResponse - result:', result);
     return result;
   };
 
@@ -396,31 +427,62 @@ const OBDScreen = ({ navigation, route }) => {
         'ATSP0',
         'ATST32',
         'ATAT1',
+        'ATCRA000',
       ];
 
       for (const cmd of initCommands) {
         try {
           await sendOBDCommand(cmd, {
-            waitAfterWriteMs: cmd === 'ATZ' ? 1800 : 300,
+            waitAfterWriteMs: cmd === 'ATZ' ? 2000 : 400,
             readAttempts: cmd === 'ATZ' ? 5 : 3,
           });
-          await delay(cmd === 'ATZ' ? 1200 : 200);
+          await delay(cmd === 'ATZ' ? 1500 : 250);
         } catch (err) {
           console.log(`Comando ${cmd} falhou, continuando...`);
         }
       }
 
       try {
-        await sendOBDCommand('0100', {
-          waitAfterWriteMs: 450,
+        const resp0100 = await sendOBDCommand('0100', {
+          waitAfterWriteMs: 600,
           readAttempts: 4,
         });
-        await delay(300);
+        const bytes0100 = parseOBDResponse(resp0100);
+        if (bytes0100) {
+          const s1 = parseSupportedPids(bytes0100);
+          if (s1) s1.forEach(p => supportedPidsRef.current.add(p));
+        }
+        await delay(400);
+
+        try {
+          const resp0120 = await sendOBDCommand('0120', {
+            waitAfterWriteMs: 500,
+            readAttempts: 3,
+          });
+          const bytes0120 = parseOBDResponse(resp0120);
+          if (bytes0120) {
+            const s2 = parseSupportedPids(bytes0120);
+            if (s2) s2.forEach(p => supportedPidsRef.current.add(p));
+          }
+          await delay(300);
+
+          const resp0140 = await sendOBDCommand('0140', {
+            waitAfterWriteMs: 500,
+            readAttempts: 3,
+          });
+          const bytes0140 = parseOBDResponse(resp0140);
+          if (bytes0140) {
+            const s3 = parseSupportedPids(bytes0140);
+            if (s3) s3.forEach(p => supportedPidsRef.current.add(p));
+          }
+        } catch (e) {
+          console.log('Query de PIDs avançados falhou, seguindo sem eles');
+        }
       } catch (err) {
         console.log('0100 falhou, mas continuando');
       }
 
-      console.log('ELM327 inicializado com sucesso!');
+      console.log('ELM327 inicializado com sucesso! PIDs suportados:', Array.from(supportedPidsRef.current));
       return true;
     } catch (err) {
       console.error('Erro geral ao inicializar OBD:', err);
@@ -428,21 +490,45 @@ const OBDScreen = ({ navigation, route }) => {
     }
   };
 
-  const useSimulatedData = () => {
-    setLiveData(prev => ({
-      ...prev,
-      rpm: Math.round(700 + Math.random() * 2000),
-      speed: Math.round(Math.random() * 120),
-      coolantTemp: Math.round(80 + Math.random() * 20),
-      fuelLevel: Math.max(10, Math.min(100, prev.fuelLevel - Math.random() * 0.5)),
-      engineLoad: Math.round(Math.random() * 100),
-      throttlePosition: Math.round(Math.random() * 100),
-      airIntakeTemp: Math.round(25 + Math.random() * 15),
-      intakeManifoldPressure: Math.round(30 + Math.random() * 70),
-      ambientTemp: Math.round(20 + Math.random() * 15),
-      fuelTrimShort: parseFloat((-5 + Math.random() * 10).toFixed(1)),
-      fuelTrimLong: parseFloat((-3 + Math.random() * 6).toFixed(1))
-    }));
+  const readBatteryVoltageFromELM = async () => {
+    try {
+      const resp = await sendOBDCommand('ATRV', {
+        waitAfterWriteMs: 400,
+        readAttempts: 3,
+      });
+      if (resp) {
+        const match = String(resp).match(/(\d+\.?\d*)/);
+        if (match) {
+          return parseFloat(parseFloat(match[1]).toFixed(1));
+        }
+      }
+    } catch (e) {
+      console.log('ATRV falhou, tentando por PID...');
+    }
+    return null;
+  };
+
+  const calculateDerivedData = (data) => {
+    const result = { ...data };
+
+    const maf = result.maf;
+    const speed = result.speed;
+    if (typeof maf === 'number' && maf > 0 && typeof speed === 'number' && speed > 0) {
+      const airFuelRatio = 14.7;
+      const fuelGramPerSec = maf / airFuelRatio;
+      const fuelLitersPerHour = (fuelGramPerSec * 3600) / 750;
+      const kmPerHour = speed;
+      if (fuelLitersPerHour > 0) {
+        result.fuelEfficiency = parseFloat((kmPerHour / fuelLitersPerHour).toFixed(1));
+      }
+    }
+
+    if (typeof result.fuelEfficiency === 'number' && result.fuelEfficiency > 0) {
+      const co2PerLiter = 2392;
+      result.co2Emission = Math.round(co2PerLiter / result.fuelEfficiency);
+    }
+
+    return result;
   };
 
   const readLiveDataFromOBD = async () => {
@@ -457,18 +543,18 @@ const OBDScreen = ({ navigation, route }) => {
       let gotRealData = false;
       const newData = { ...liveData };
 
-      const readPid = async (cmd, parser) => {
+      const readPid = async (cmd, parser, pidHex = null) => {
         try {
+          if (pidHex && !isPidSupported(pidHex)) {
+            return;
+          }
           const resp = await sendOBDCommand(cmd, {
-            waitAfterWriteMs: 300,
+            waitAfterWriteMs: 350,
             readAttempts: 3,
           });
-          console.log(`readPid ${cmd} - resp:`, resp);
           const bytes = parseOBDResponse(resp);
-          console.log(`readPid ${cmd} - bytes:`, bytes);
           if (bytes && bytes.length >= 2) {
             const parsedValues = parser(bytes);
-            console.log(`readPid ${cmd} - parsed:`, parsedValues);
             if (parsedValues && typeof parsedValues === 'object') {
               Object.assign(newData, parsedValues);
               gotRealData = true;
@@ -479,23 +565,43 @@ const OBDScreen = ({ navigation, route }) => {
         }
       };
 
-      await readPid('010C', b => ({ rpm: Math.round(((b[2] * 256 + b[3]) / 4)) }));
-      await readPid('010D', b => ({ speed: b[2] }));
-      await readPid('0105', b => ({ coolantTemp: b[2] - 40 }));
-      await readPid('0104', b => ({ engineLoad: Math.round((b[2] * 100) / 255) }));
-      await readPid('0111', b => ({ throttlePosition: Math.round((b[2] * 100) / 255) }));
-      await readPid('012F', b => ({ fuelLevel: Math.round((b[2] * 100) / 255) }));
-      await readPid('010F', b => ({ airIntakeTemp: b[2] - 40 }));
-      await readPid('010B', b => ({ intakeManifoldPressure: b[2] }));
-      await readPid('0146', b => ({ ambientTemp: b[2] - 40 }));
-      await readPid('0106', b => ({ fuelTrimShort: parseFloat(((b[2] - 128) * 100 / 128).toFixed(1)) }));
-      await readPid('0107', b => ({ fuelTrimLong: parseFloat(((b[2] - 128) * 100 / 128).toFixed(1)) }));
+      await readPid('0104', b => ({ engineLoad: Math.round((b[2] * 100) / 255) }), '0104');
+      await readPid('0105', b => ({ coolantTemp: b[2] - 40 }), '0105');
+      await readPid('0106', b => ({ fuelTrimShort: parseFloat(((b[2] - 128) * 100 / 128).toFixed(1)) }), '0106');
+      await readPid('0107', b => ({ fuelTrimLong: parseFloat(((b[2] - 128) * 100 / 128).toFixed(1)) }), '0107');
+      await readPid('010A', b => ({ fuelPressure: b[2] * 3 }), '010A');
+      await readPid('010B', b => ({ intakeManifoldPressure: b[2] }), '010B');
+      await readPid('010C', b => ({ rpm: Math.round(((b[2] * 256 + b[3]) / 4)) }), '010C');
+      await readPid('010D', b => ({ speed: b[2] }), '010D');
+      await readPid('010E', b => ({ timingAdvance: parseFloat(((b[2] / 2) - 64).toFixed(1)) }), '010E');
+      await readPid('010F', b => ({ airIntakeTemp: b[2] - 40 }), '010F');
+      await readPid('0110', b => ({ maf: parseFloat(((b[2] * 256 + b[3]) / 100).toFixed(2)) }), '0110');
+      await readPid('0111', b => ({ throttlePosition: Math.round((b[2] * 100) / 255) }), '0111');
+      await readPid('012C', b => ({ egr: Math.round((b[2] * 100) / 255) }), '012C');
+      await readPid('012F', b => ({ fuelLevel: Math.round((b[2] * 100) / 255) }), '012F');
+      await readPid('0132', b => ({ evapSystemVaporPressure: parseFloat((((b[2] * 256) + b[3]) / 4).toFixed(1)) }), '0132');
+      await readPid('0134', b => {
+        if (b.length >= 5) {
+          const lambda = parseFloat(((b[2] * 256 + b[3]) / 32768).toFixed(3));
+          return { lambda };
+        }
+        return null;
+      }, '0134');
+      await readPid('013C', b => ({ catalystTemp: Math.round(((b[2] * 256 + b[3]) / 10) - 40) }), '013C');
+      await readPid('0142', b => ({ batteryVoltage: parseFloat(((b[2] * 256 + b[3]) / 1000).toFixed(1)) }), '0142');
+      await readPid('0146', b => ({ ambientTemp: b[2] - 40 }), '0146');
+      await readPid('015C', b => ({ oilTemp: b[2] - 40 }), '015C');
 
-      console.log('readLiveDataFromOBD - newData:', newData, 'gotRealData:', gotRealData);
+      const elmVoltage = await readBatteryVoltageFromELM();
+      if (elmVoltage !== null) {
+        newData.batteryVoltage = elmVoltage;
+        gotRealData = true;
+      }
+
+      const finalData = calculateDerivedData(newData);
 
       if (gotRealData) {
-        setLiveData(newData);
-        // Auto-save scan
+        setLiveData(finalData);
         if (vehicle?.id) {
           await saveOBDScanRecord([]);
         }
@@ -523,7 +629,7 @@ const OBDScreen = ({ navigation, route }) => {
       }
 
       const resp = await sendOBDCommand('03', {
-        waitAfterWriteMs: 500,
+        waitAfterWriteMs: 700,
         readAttempts: 4,
       });
       const codes = parseDTCResponse(resp);
@@ -573,9 +679,7 @@ const OBDScreen = ({ navigation, route }) => {
       return;
     }
 
-    console.log('Android Version:', Platform.Version);
     const hasPermissions = await requestBluetoothPermissions();
-    console.log('Permissões concedidas:', hasPermissions);
 
     if (!hasPermissions) {
       setAlertModalData({
@@ -604,7 +708,6 @@ const OBDScreen = ({ navigation, route }) => {
     try {
       if (BluetoothClassic) {
         const devices = await BluetoothClassic.getBondedDevices();
-        console.log('Dispositivos encontrados:', devices);
         const looksLikeOBD = (name = '') => {
           const normalizedName = name.toLowerCase();
           return normalizedName.includes('obd')
@@ -655,6 +758,7 @@ const OBDScreen = ({ navigation, route }) => {
     try {
       const connection = await BluetoothClassic.connectToDevice(device.address, OBD_CONNECTION_OPTIONS);
       connectionRef.current = connection;
+      supportedPidsRef.current = new Set();
 
       const initialized = await initializeOBDDevice();
       if (!initialized) {
@@ -669,12 +773,11 @@ const OBDScreen = ({ navigation, route }) => {
         clearInterval(intervalRef.current);
       }
 
-      // Read data immediately first!
       await readLiveDataFromOBD();
 
       intervalRef.current = setInterval(() => {
         readLiveDataFromOBD();
-      }, 2000);
+      }, 2500);
 
       setAlertModalData({
         type: 'success',
@@ -716,7 +819,8 @@ const OBDScreen = ({ navigation, route }) => {
     setShowDashboard(false);
     setDeviceList([]);
     setConnectedDevice(null);
-    
+    supportedPidsRef.current = new Set();
+
     setAlertModalData({
       type: 'info',
       title: 'Desconectado',
@@ -727,58 +831,35 @@ const OBDScreen = ({ navigation, route }) => {
     setAlertModalVisible(true);
   };
 
-  const handleClearDTCs = () => {
-    setAlertModalData({
-      type: 'confirm',
-      title: 'Confirmar',
-      message: 'Tem certeza que deseja limpar os códigos de erro (apenas localmente no app)?',
-      confirmButtonText: 'Limpar',
-      cancelButtonText: 'Cancelar',
-      onConfirm: () => {
-        setDtcCodes([]);
-        setAlertModalVisible(false);
-        
-        setTimeout(() => {
-          setAlertModalData({
-            type: 'success',
-            title: 'Sucesso',
-            message: 'Códigos limpos com sucesso!',
-            confirmButtonText: 'Ok',
-            onConfirm: () => setAlertModalVisible(false),
-          });
-          setAlertModalVisible(true);
-        }, 100);
-      },
-      onCancel: () => setAlertModalVisible(false),
-    });
-    setAlertModalVisible(true);
+  const renderValue = (value, suffix = '') => {
+    if (value === NOT_AVAILABLE || value === null || value === undefined) {
+      return <Text style={styles.dataCardValueNA}>{NOT_AVAILABLE}</Text>;
+    }
+    return <Text style={styles.dataCardValue}>{value}{suffix}</Text>;
   };
 
-  const handleSolveDTC = (dtc, index) => {
-    setAlertModalData({
-      type: 'confirm',
-      title: 'Solucionar Problema',
-      message: `Marcar o código ${dtc.code} como solucionado?`,
-      confirmButtonText: 'Marcar como Solucionado',
-      cancelButtonText: 'Cancelar',
-      onConfirm: () => {
-        setDtcCodes(prev => prev.filter((_, i) => i !== index));
-        setAlertModalVisible(false);
-        
-        setTimeout(() => {
-          setAlertModalData({
-            type: 'success',
-            title: 'Sucesso',
-            message: `${dtc.code} marcado como solucionado!`,
-            confirmButtonText: 'Ok',
-            onConfirm: () => setAlertModalVisible(false),
-          });
-          setAlertModalVisible(true);
-        }, 100);
-      },
-      onCancel: () => setAlertModalVisible(false),
-    });
-    setAlertModalVisible(true);
+  const renderGaugeValue = (value, suffix = '') => {
+    if (value === NOT_AVAILABLE || value === null || value === undefined) {
+      return <Text style={styles.gaugeValueNA}>{NOT_AVAILABLE}</Text>;
+    }
+    return (
+      <>
+        <Text style={styles.gaugeValue}>{value}</Text>
+        {suffix ? <Text style={styles.gaugeUnit}>{suffix}</Text> : null}
+      </>
+    );
+  };
+
+  const renderLargeValue = (value, suffix = '') => {
+    if (value === NOT_AVAILABLE || value === null || value === undefined) {
+      return <Text style={styles.consumptionValueNA}>{NOT_AVAILABLE}</Text>;
+    }
+    return (
+      <>
+        <Text style={styles.consumptionValue}>{value}</Text>
+        {suffix ? <Text style={styles.consumptionUnit}>{suffix}</Text> : null}
+      </>
+    );
   };
 
   return (
@@ -853,18 +934,36 @@ const OBDScreen = ({ navigation, route }) => {
               <View style={styles.mainGaugesRow}>
                 <View style={styles.gaugeItem}>
                   <MaterialCommunityIcons name="tachometer-slow" size={40} color="#FFCF00" />
-                  <Text style={styles.gaugeValue}>{liveData.rpm}</Text>
-                  <Text style={styles.gaugeUnit}>RPM</Text>
+                  {liveData.rpm === NOT_AVAILABLE ? (
+                    <Text style={styles.gaugeValueNA}>{NOT_AVAILABLE}</Text>
+                  ) : (
+                    <>
+                      <Text style={styles.gaugeValue}>{liveData.rpm}</Text>
+                      <Text style={styles.gaugeUnit}>RPM</Text>
+                    </>
+                  )}
                 </View>
                 <View style={styles.gaugeItem}>
                   <MaterialCommunityIcons name="speedometer" size={40} color="#FFCF00" />
-                  <Text style={styles.gaugeValue}>{liveData.speed}</Text>
-                  <Text style={styles.gaugeUnit}>KM/H</Text>
+                  {liveData.speed === NOT_AVAILABLE ? (
+                    <Text style={styles.gaugeValueNA}>{NOT_AVAILABLE}</Text>
+                  ) : (
+                    <>
+                      <Text style={styles.gaugeValue}>{liveData.speed}</Text>
+                      <Text style={styles.gaugeUnit}>KM/H</Text>
+                    </>
+                  )}
                 </View>
                 <View style={styles.gaugeItem}>
                   <MaterialCommunityIcons name="thermometer" size={40} color="#FFCF00" />
-                  <Text style={styles.gaugeValue}>{liveData.coolantTemp}°C</Text>
-                  <Text style={styles.gaugeUnit}>TEMPERATURA</Text>
+                  {liveData.coolantTemp === NOT_AVAILABLE ? (
+                    <Text style={styles.gaugeValueNA}>{NOT_AVAILABLE}</Text>
+                  ) : (
+                    <>
+                      <Text style={styles.gaugeValue}>{liveData.coolantTemp}°C</Text>
+                      <Text style={styles.gaugeUnit}>TEMPERATURA</Text>
+                    </>
+                  )}
                 </View>
               </View>
 
@@ -872,32 +971,142 @@ const OBDScreen = ({ navigation, route }) => {
                 <View style={styles.dataCard}>
                   <MaterialCommunityIcons name="gas-station" size={22} color="#FFCF00" />
                   <Text style={styles.dataCardLabel}>Combustível</Text>
-                  <Text style={styles.dataCardValue}>{liveData.fuelLevel}%</Text>
+                  {liveData.fuelLevel === NOT_AVAILABLE ? (
+                    <Text style={styles.dataCardValueNA}>{NOT_AVAILABLE}</Text>
+                  ) : (
+                    <Text style={styles.dataCardValue}>{liveData.fuelLevel}%</Text>
+                  )}
                 </View>
                 <View style={styles.dataCard}>
                   <MaterialCommunityIcons name="car-battery" size={22} color="#FFCF00" />
                   <Text style={styles.dataCardLabel}>Carga do Motor</Text>
-                  <Text style={styles.dataCardValue}>{liveData.engineLoad}%</Text>
+                  {liveData.engineLoad === NOT_AVAILABLE ? (
+                    <Text style={styles.dataCardValueNA}>{NOT_AVAILABLE}</Text>
+                  ) : (
+                    <Text style={styles.dataCardValue}>{liveData.engineLoad}%</Text>
+                  )}
                 </View>
                 <View style={styles.dataCard}>
                   <MaterialCommunityIcons name="gauge" size={22} color="#FFCF00" />
                   <Text style={styles.dataCardLabel}>Pressão Coletor</Text>
-                  <Text style={styles.dataCardValue}>{liveData.intakeManifoldPressure} kPa</Text>
+                  {liveData.intakeManifoldPressure === NOT_AVAILABLE ? (
+                    <Text style={styles.dataCardValueNA}>{NOT_AVAILABLE}</Text>
+                  ) : (
+                    <Text style={styles.dataCardValue}>{liveData.intakeManifoldPressure} kPa</Text>
+                  )}
                 </View>
                 <View style={styles.dataCard}>
                   <MaterialCommunityIcons name="engine" size={22} color="#FFCF00" />
                   <Text style={styles.dataCardLabel}>Posição Acelerador</Text>
-                  <Text style={styles.dataCardValue}>{liveData.throttlePosition}%</Text>
+                  {liveData.throttlePosition === NOT_AVAILABLE ? (
+                    <Text style={styles.dataCardValueNA}>{NOT_AVAILABLE}</Text>
+                  ) : (
+                    <Text style={styles.dataCardValue}>{liveData.throttlePosition}%</Text>
+                  )}
                 </View>
                 <View style={styles.dataCard}>
                   <MaterialCommunityIcons name="oil" size={22} color="#FFCF00" />
                   <Text style={styles.dataCardLabel}>Temp. Ar Admissão</Text>
-                  <Text style={styles.dataCardValue}>{liveData.airIntakeTemp}°C</Text>
+                  {liveData.airIntakeTemp === NOT_AVAILABLE ? (
+                    <Text style={styles.dataCardValueNA}>{NOT_AVAILABLE}</Text>
+                  ) : (
+                    <Text style={styles.dataCardValue}>{liveData.airIntakeTemp}°C</Text>
+                  )}
                 </View>
                 <View style={styles.dataCard}>
                   <MaterialCommunityIcons name="water" size={22} color="#FFCF00" />
                   <Text style={styles.dataCardLabel}>Temp. Ambiente</Text>
-                  <Text style={styles.dataCardValue}>{liveData.ambientTemp}°C</Text>
+                  {liveData.ambientTemp === NOT_AVAILABLE ? (
+                    <Text style={styles.dataCardValueNA}>{NOT_AVAILABLE}</Text>
+                  ) : (
+                    <Text style={styles.dataCardValue}>{liveData.ambientTemp}°C</Text>
+                  )}
+                </View>
+                <View style={styles.dataCard}>
+                  <MaterialCommunityIcons name="car-battery" size={22} color="#FFCF00" />
+                  <Text style={styles.dataCardLabel}>Tensão Bateria</Text>
+                  {liveData.batteryVoltage === NOT_AVAILABLE ? (
+                    <Text style={styles.dataCardValueNA}>{NOT_AVAILABLE}</Text>
+                  ) : (
+                    <Text style={styles.dataCardValue}>{liveData.batteryVoltage} V</Text>
+                  )}
+                </View>
+                <View style={styles.dataCard}>
+                  <MaterialCommunityIcons name="weather-windy" size={22} color="#FFCF00" />
+                  <Text style={styles.dataCardLabel}>Fluxo de Ar (MAF)</Text>
+                  {liveData.maf === NOT_AVAILABLE ? (
+                    <Text style={styles.dataCardValueNA}>{NOT_AVAILABLE}</Text>
+                  ) : (
+                    <Text style={styles.dataCardValue}>{liveData.maf} g/s</Text>
+                  )}
+                </View>
+                <View style={styles.dataCard}>
+                  <MaterialCommunityIcons name="fire" size={22} color="#FFCF00" />
+                  <Text style={styles.dataCardLabel}>Pressão Combustível</Text>
+                  {liveData.fuelPressure === NOT_AVAILABLE ? (
+                    <Text style={styles.dataCardValueNA}>{NOT_AVAILABLE}</Text>
+                  ) : (
+                    <Text style={styles.dataCardValue}>{liveData.fuelPressure} kPa</Text>
+                  )}
+                </View>
+                <View style={styles.dataCard}>
+                  <MaterialCommunityIcons name="thermometer-lines" size={22} color="#FFCF00" />
+                  <Text style={styles.dataCardLabel}>Temp. Óleo Motor</Text>
+                  {liveData.oilTemp === NOT_AVAILABLE ? (
+                    <Text style={styles.dataCardValueNA}>{NOT_AVAILABLE}</Text>
+                  ) : (
+                    <Text style={styles.dataCardValue}>{liveData.oilTemp}°C</Text>
+                  )}
+                </View>
+                <View style={styles.dataCard}>
+                  <MaterialCommunityIcons name="omega" size={22} color="#FFCF00" />
+                  <Text style={styles.dataCardLabel}>Sonda Lambda</Text>
+                  {liveData.lambda === NOT_AVAILABLE ? (
+                    <Text style={styles.dataCardValueNA}>{NOT_AVAILABLE}</Text>
+                  ) : (
+                    <Text style={styles.dataCardValue}>{liveData.lambda} λ</Text>
+                  )}
+                </View>
+                <View style={styles.dataCard}>
+                  <MaterialCommunityIcons name="clock-fast" size={22} color="#FFCF00" />
+                  <Text style={styles.dataCardLabel}>Avanço Ignição</Text>
+                  {liveData.timingAdvance === NOT_AVAILABLE ? (
+                    <Text style={styles.dataCardValueNA}>{NOT_AVAILABLE}</Text>
+                  ) : (
+                    <Text style={styles.dataCardValue}>{liveData.timingAdvance}°</Text>
+                  )}
+                </View>
+                <View style={styles.dataCard}>
+                  <MaterialCommunityIcons name="valve" size={22} color="#FFCF00" />
+                  <Text style={styles.dataCardLabel}>EGR</Text>
+                  {liveData.egr === NOT_AVAILABLE ? (
+                    <Text style={styles.dataCardValueNA}>{NOT_AVAILABLE}</Text>
+                  ) : (
+                    <Text style={styles.dataCardValue}>{liveData.egr}%</Text>
+                  )}
+                </View>
+                <View style={styles.dataCard}>
+                  <MaterialCommunityIcons name="waves" size={22} color="#FFCF00" />
+                  <Text style={styles.dataCardLabel}>Pressão Evap.</Text>
+                  {liveData.evapSystemVaporPressure === NOT_AVAILABLE ? (
+                    <Text style={styles.dataCardValueNA}>{NOT_AVAILABLE}</Text>
+                  ) : (
+                    <Text style={styles.dataCardValue}>{liveData.evapSystemVaporPressure} Pa</Text>
+                  )}
+                </View>
+                <View style={styles.dataCard}>
+                  <MaterialCommunityIcons name="fireplace" size={22} color="#FFCF00" />
+                  <Text style={styles.dataCardLabel}>Temp. Catalisador</Text>
+                  {liveData.catalystTemp === NOT_AVAILABLE ? (
+                    <Text style={styles.dataCardValueNA}>{NOT_AVAILABLE}</Text>
+                  ) : (
+                    <Text style={styles.dataCardValue}>{liveData.catalystTemp}°C</Text>
+                  )}
+                </View>
+                <View style={styles.dataCard}>
+                  <MaterialCommunityIcons name="filter-variant" size={22} color="#FFCF00" />
+                  <Text style={styles.dataCardLabel}>Pressão Óleo</Text>
+                  <Text style={styles.dataCardValueNA}>{NOT_AVAILABLE}</Text>
                 </View>
               </View>
             </View>
@@ -912,10 +1121,6 @@ const OBDScreen = ({ navigation, route }) => {
                 <View>
                   <View style={styles.dtcHeader}>
                     <Text style={styles.dtcCount}>{dtcCodes.length} Códigos Encontrados</Text>
-                    <TouchableOpacity style={styles.clearDtcBtn} onPress={handleClearDTCs}>
-                      <MaterialCommunityIcons name="delete" size={18} color="#FFCF00" />
-                      <Text style={styles.clearDtcText}>Limpar</Text>
-                    </TouchableOpacity>
                   </View>
 
                   {dtcCodes.map((dtc, index) => (
@@ -925,13 +1130,6 @@ const OBDScreen = ({ navigation, route }) => {
                         <Text style={styles.dtcCode}>{dtc.code}</Text>
                         <Text style={styles.dtcDescription}>{dtc.description}</Text>
                       </View>
-                      <TouchableOpacity
-                        style={styles.solveDtcButton}
-                        onPress={() => handleSolveDTC(dtc, index)}
-                      >
-                        <MaterialCommunityIcons name="wrench" size={18} color="#FFCF00" />
-                        <Text style={styles.solveDtcText}>Solucionar</Text>
-                      </TouchableOpacity>
                     </View>
                   ))}
                 </View>
@@ -961,26 +1159,52 @@ const OBDScreen = ({ navigation, route }) => {
               <View style={styles.consumptionGrid}>
                 <View style={styles.consumptionCard}>
                   <MaterialCommunityIcons name="speedometer" size={32} color="#FFCF00" />
-                  <Text style={styles.consumptionValue}>{(8 + Math.random() * 4).toFixed(1)}</Text>
-                  <Text style={styles.consumptionUnit}>KM/L</Text>
-                  <Text style={styles.consumptionLabel}>Eficiência</Text>
+                  {liveData.fuelEfficiency === NOT_AVAILABLE ? (
+                    <>
+                      <Text style={styles.consumptionValueNA}>{NOT_AVAILABLE}</Text>
+                      <Text style={styles.consumptionLabel}>Eficiência</Text>
+                    </>
+                  ) : (
+                    <>
+                      <Text style={styles.consumptionValue}>{liveData.fuelEfficiency}</Text>
+                      <Text style={styles.consumptionUnit}>KM/L</Text>
+                      <Text style={styles.consumptionLabel}>Eficiência</Text>
+                    </>
+                  )}
                 </View>
                 <View style={styles.consumptionCard}>
                   <MaterialCommunityIcons name="smog" size={32} color="#FFCF00" />
-                  <Text style={styles.consumptionValue}>{(120 + Math.random() * 80).toFixed(0)}</Text>
-                  <Text style={styles.consumptionUnit}>G/KM</Text>
-                  <Text style={styles.consumptionLabel}>Emissões CO₂</Text>
+                  {liveData.co2Emission === NOT_AVAILABLE ? (
+                    <>
+                      <Text style={styles.consumptionValueNA}>{NOT_AVAILABLE}</Text>
+                      <Text style={styles.consumptionLabel}>Emissões CO₂</Text>
+                    </>
+                  ) : (
+                    <>
+                      <Text style={styles.consumptionValue}>{liveData.co2Emission}</Text>
+                      <Text style={styles.consumptionUnit}>G/KM</Text>
+                      <Text style={styles.consumptionLabel}>Emissões CO₂</Text>
+                    </>
+                  )}
                 </View>
               </View>
 
               <View style={styles.fuelTrimsRow}>
                 <View style={styles.fuelTrimItem}>
                   <Text style={styles.fuelTrimLabel}>Ajuste Curto</Text>
-                  <Text style={styles.fuelTrimValue}>{liveData.fuelTrimShort}%</Text>
+                  {liveData.fuelTrimShort === NOT_AVAILABLE ? (
+                    <Text style={styles.fuelTrimValueNA}>{NOT_AVAILABLE}</Text>
+                  ) : (
+                    <Text style={styles.fuelTrimValue}>{liveData.fuelTrimShort}%</Text>
+                  )}
                 </View>
                 <View style={styles.fuelTrimItem}>
                   <Text style={styles.fuelTrimLabel}>Ajuste Longo</Text>
-                  <Text style={styles.fuelTrimValue}>{liveData.fuelTrimLong}%</Text>
+                  {liveData.fuelTrimLong === NOT_AVAILABLE ? (
+                    <Text style={styles.fuelTrimValueNA}>{NOT_AVAILABLE}</Text>
+                  ) : (
+                    <Text style={styles.fuelTrimValue}>{liveData.fuelTrimLong}%</Text>
+                  )}
                 </View>
               </View>
             </View>
@@ -1094,7 +1318,7 @@ const OBDScreen = ({ navigation, route }) => {
       </Modal>
 
       <BottomNav navigation={navigation} user={loggedUser} activeScreen="Home" />
-      
+
       <AMPAlertModal
         visible={alertModalVisible}
         type={alertModalData.type}
@@ -1329,6 +1553,13 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     marginTop: 8
   },
+  gaugeValueNA: {
+    color: '#666666',
+    fontSize: 20,
+    fontWeight: '600',
+    marginTop: 16,
+    fontStyle: 'italic'
+  },
   gaugeUnit: {
     color: '#999',
     fontSize: 12,
@@ -1345,18 +1576,27 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     padding: 16,
     marginBottom: 12,
-    alignItems: 'center'
+    alignItems: 'center',
+    minHeight: 110
   },
   dataCardLabel: {
     color: '#999',
-    fontSize: 12,
-    marginTop: 8
+    fontSize: 11,
+    marginTop: 8,
+    textAlign: 'center'
   },
   dataCardValue: {
     color: '#FFFFFF',
     fontSize: 20,
     fontWeight: 'bold',
     marginTop: 4
+  },
+  dataCardValueNA: {
+    color: '#666666',
+    fontSize: 16,
+    fontWeight: '500',
+    marginTop: 8,
+    fontStyle: 'italic'
   },
   dtcHeader: {
     flexDirection: 'row',
@@ -1369,16 +1609,6 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: 'bold'
   },
-  clearDtcBtn: {
-    flexDirection: 'row',
-    alignItems: 'center'
-  },
-  clearDtcText: {
-    color: '#FFCF00',
-    fontSize: 14,
-    fontWeight: '600',
-    marginLeft: 4
-  },
   dtcItem: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1390,6 +1620,7 @@ const styles = StyleSheet.create({
   dtcSeverity: {
     width: 6,
     height: '100%',
+    minHeight: 50,
     borderRadius: 3,
     marginRight: 12
   },
@@ -1405,16 +1636,6 @@ const styles = StyleSheet.create({
     color: '#999',
     fontSize: 12,
     marginTop: 4
-  },
-  solveDtcButton: {
-    flexDirection: 'row',
-    alignItems: 'center'
-  },
-  solveDtcText: {
-    color: '#FFCF00',
-    fontSize: 12,
-    fontWeight: '600',
-    marginLeft: 4
   },
   noDtcContainer: {
     alignItems: 'center',
@@ -1449,13 +1670,21 @@ const styles = StyleSheet.create({
     backgroundColor: '#3A3A3A',
     borderRadius: 12,
     padding: 20,
-    alignItems: 'center'
+    alignItems: 'center',
+    minHeight: 150
   },
   consumptionValue: {
     color: '#FFCF00',
     fontSize: 32,
     fontWeight: 'bold',
     marginTop: 12
+  },
+  consumptionValueNA: {
+    color: '#666666',
+    fontSize: 20,
+    fontWeight: '500',
+    marginTop: 20,
+    fontStyle: 'italic'
   },
   consumptionUnit: {
     color: '#FFFFFF',
@@ -1488,6 +1717,13 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: 'bold',
     marginTop: 4
+  },
+  fuelTrimValueNA: {
+    color: '#666666',
+    fontSize: 16,
+    fontWeight: '500',
+    marginTop: 8,
+    fontStyle: 'italic'
   },
   actionButtonsContainer: {
     flexDirection: 'row',

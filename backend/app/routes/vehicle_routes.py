@@ -140,42 +140,116 @@ def get_or_update_vehicle(vehicle_id):
             return jsonify({'error': 'Veículo não encontrado'}), 404
         return jsonify(vehicle.to_dict()), 200
 
+    print(f"\n=== ATUALIZANDO VEÍCULO ID: {vehicle_id} ===")
     data = request.json
+    print(f"Dados recebidos para atualização: {data}")
+
     vehicle = Vehicle.query.get(vehicle_id)
     if not vehicle:
+        print("Erro: Veículo não encontrado no banco")
         return jsonify({'error': 'Veículo não encontrado'}), 404
 
     try:
         if 'brand' in data:
+            if not data['brand'] or str(data['brand']).strip() == '':
+                return jsonify({'error': 'Marca não pode ser vazia'}), 400
+            if data['brand'] not in SUPPORTED_BRANDS:
+                return jsonify({'error': 'Marca não compatível com OBD-II Bluetooth'}), 400
             vehicle.brand = data['brand']
+
+        effective_brand = data.get('brand') if 'brand' in data else vehicle.brand
+
         if 'model' in data:
+            if not data['model'] or str(data['model']).strip() == '':
+                return jsonify({'error': 'Modelo não pode ser vazio'}), 400
+            brand_data = SUPPORTED_BRANDS.get(effective_brand)
+            if brand_data and data['model'] not in brand_data.get('models', []):
+                return jsonify({'error': 'Modelo não compatível com OBD-II Bluetooth'}), 400
             vehicle.model = data['model']
+
+        effective_model = data.get('model') if 'model' in data else vehicle.model
+
         if 'year' in data:
-            vehicle.year = data['year']
+            if data['year'] is None or data['year'] == '' or (isinstance(data['year'], float) and data['year'] != int(data['year'])):
+                return jsonify({'error': 'Ano inválido'}), 400
+            try:
+                year_value = int(data['year'])
+            except (TypeError, ValueError):
+                return jsonify({'error': 'Ano inválido'}), 400
+            brand_data = SUPPORTED_BRANDS.get(effective_brand, {})
+            model_start_year = brand_data.get('model_start_years', {}).get(
+                effective_model, brand_data.get('start_year', 2010)
+            )
+            current_year = 2026
+            if year_value < model_start_year or year_value > current_year:
+                return jsonify({
+                    'error': f'Ano {year_value} não é válido para {effective_brand} {effective_model}. '
+                             f'Anos disponíveis: {model_start_year} - {current_year}'
+                }), 400
+            vehicle.year = year_value
+
+        if 'engine_type' in data and data.get('engine_type'):
+            brand_data = SUPPORTED_BRANDS.get(effective_brand, {})
+            valid_engines = brand_data.get('engines', {}).get(effective_model, [])
+            if valid_engines and data['engine_type'] not in valid_engines:
+                return jsonify({
+                    'error': f'Motorização {data["engine_type"]} não é válida para {effective_brand} {effective_model}. '
+                             f'Opções válidas: {", ".join(valid_engines)}'
+                }), 400
+            vehicle.engine_type = data['engine_type']
+
         if 'mileage' in data:
-            vehicle.mileage = data['mileage']
+            if data['mileage'] is None or data['mileage'] == '':
+                vehicle.mileage = 0
+            else:
+                try:
+                    vehicle.mileage = int(data['mileage'])
+                except (TypeError, ValueError):
+                    return jsonify({'error': 'Quilometragem inválida'}), 400
+
         if 'last_oil_change' in data:
-            vehicle.last_oil_change = data['last_oil_change']
+            if data['last_oil_change'] is None or data['last_oil_change'] == '':
+                vehicle.last_oil_change = 0
+            else:
+                try:
+                    vehicle.last_oil_change = int(data['last_oil_change'])
+                except (TypeError, ValueError):
+                    return jsonify({'error': 'Última troca de óleo inválida'}), 400
+
         if 'last_belt_change' in data:
-            vehicle.last_belt_change = data['last_belt_change']
+            if data['last_belt_change'] is None or data['last_belt_change'] == '':
+                vehicle.last_belt_change = 0
+            else:
+                try:
+                    vehicle.last_belt_change = int(data['last_belt_change'])
+                except (TypeError, ValueError):
+                    return jsonify({'error': 'Última troca de correia inválida'}), 400
+
         if 'last_brake_change' in data:
-            vehicle.last_brake_change = data['last_brake_change']
+            if data['last_brake_change'] is None or data['last_brake_change'] == '':
+                vehicle.last_brake_change = 0
+            else:
+                try:
+                    vehicle.last_brake_change = int(data['last_brake_change'])
+                except (TypeError, ValueError):
+                    return jsonify({'error': 'Última troca de freios inválida'}), 400
+
         if 'transmission' in data:
             vehicle.transmission = data['transmission']
         if 'fuel_type' in data:
             vehicle.fuel_type = data['fuel_type']
-        if 'engine_type' in data:
-            vehicle.engine_type = data['engine_type']
         if 'usage_type' in data:
             vehicle.usage_type = data['usage_type']
 
         db.session.commit()
+        print("Veículo atualizado com sucesso!")
         return jsonify({
             'message': 'Veículo atualizado com sucesso',
             'vehicle': vehicle.to_dict()
         }), 200
     except Exception as e:
         db.session.rollback()
+        print(f"Erro ao atualizar veículo: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 

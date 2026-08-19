@@ -12,6 +12,7 @@ class User(db.Model):
     phone = db.Column(db.String(20), nullable=True)
     avatar = db.Column(db.Text, nullable=True)  # Base64 encoded image or URL
     vehicles = db.relationship('Vehicle', backref='owner', lazy=True, cascade='all, delete-orphan')
+    notifications = db.relationship('Notification', backref='user', lazy=True, cascade='all, delete-orphan')
 
     def to_dict(self):
         return {
@@ -98,5 +99,61 @@ class OBDScan(db.Model):
             'dtc_codes': self.dtc_codes,
             'live_data': self.live_data,
             'connected_device': self.connected_device
+        }
+
+
+NOTIFICATION_TYPES = {
+    'MAINTENANCE_REMINDER': 'maintenance',
+    'OBD_ALERT': 'obd',
+    'VEHICLE_TIP': 'tip',
+    'MILESTONE': 'milestone',
+    'PREMIUM_INSIGHT': 'premium',
+    'FUEL_ALERT': 'fuel',
+    'SYSTEM': 'system',
+}
+
+NOTIFICATION_PRIORITY = {
+    'CRITICAL': 'critical',
+    'HIGH': 'high',
+    'MEDIUM': 'medium',
+    'LOW': 'low',
+}
+
+
+class Notification(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+    vehicle_id = db.Column(db.Integer, db.ForeignKey('vehicle.id'), nullable=True)
+    title = db.Column(db.String(120), nullable=False)
+    description = db.Column(db.Text, nullable=False)
+    notification_type = db.Column(db.String(40), default=NOTIFICATION_TYPES['SYSTEM'])
+    priority = db.Column(db.String(20), default=NOTIFICATION_PRIORITY['MEDIUM'])
+    read = db.Column(db.Boolean, default=False, nullable=False)
+    ai_generated = db.Column(db.Boolean, default=False, nullable=False)
+    premium_only = db.Column(db.Boolean, default=False, nullable=False)
+    action = db.Column(db.String(80), nullable=True)
+    payload = db.Column(db.JSON, default={})
+    created_at = db.Column(db.String(50), nullable=False)
+
+    __table_args__ = (
+        db.Index('idx_notif_user_read', 'user_id', 'read'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'user_id': self.user_id,
+            'vehicle_id': self.vehicle_id,
+            'title': self.title,
+            'description': self.description,
+            'type': self.notification_type,
+            'priority': self.priority,
+            'read': bool(self.read),
+            'ai_generated': bool(self.ai_generated),
+            'premium_only': bool(self.premium_only),
+            'action': self.action,
+            'payload': self.payload or {},
+            'time': self.created_at,
+            'created_at': self.created_at,
         }
 

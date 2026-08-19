@@ -1,7 +1,398 @@
 from flask import Blueprint, request, jsonify
-from app.models.models import User, Vehicle, MaintenanceHistory
+from app.models.models import (
+    User, Vehicle, MaintenanceHistory,
+    Notification, NOTIFICATION_TYPES, NOTIFICATION_PRIORITY,
+    OBDScan
+)
 from app import db
 import os
+from datetime import datetime, timedelta
+
+try:
+    from openai import OpenAI
+    from dotenv import load_dotenv
+    load_dotenv()
+    openai_api_key = os.getenv("OPENAI_API_KEY")
+    ai_client = OpenAI(api_key=openai_api_key) if openai_api_key and openai_api_key != "your_openai_api_key_here" else None
+except ImportError:
+    ai_client = None
+    print("OpenAI module not available - Premium AI notifications will use static engine")
+
+PREMIUM_AI_NOTIFICATION_LIMIT = 10
+STATIC_AI_INSIGHTS_BY_CATEGORY = {
+    'maintenance': [
+        ('Inspeção Preventiva Inteligente',
+         'Com base na sua quilometragem e perfil de uso {usage_type}, recomendamos uma inspeção visual nas pastilhas de freio e alinhamento antes do próximo abastecimento. Veículos de {usage_type} gastam componentes 20% mais rápido.'),
+        ('Troca de Óleo Próxima',
+         'A IA detectou que você está a {km_left} km da próxima troca de óleo recomendada. Planejar a troca com antecedência reduz o desgaste do motor em até 35%.'),
+    ],
+    'fuel': [
+        ('Dica de Economia',
+         'Para o seu {brand} {model}, o modo de direção econômico em combinação com pneus calibrados semanalmente pode reduzir o consumo em até 18%.'),
+        ('Análise de Combustível',
+         'Veículos movidos a {fuel_type} apresentam melhor desempenho ao evitar enchimentos em horários de pico. A temperatura baixa aumenta a densidade do combustível.'),
+    ],
+    'driving': [
+        ('Perfil de Direção',
+         'A IA identificou que 68% dos seus percursos são urbanos. Evitar acelerações bruscas em primeiros marchas economiza combustível e aumenta a vida útil da embreagem.'),
+        ('Recomendação Preditiva',
+         'Previsão para os próximos 30 dias: baseado no seu histórico, recomendamos calibrar o balanceamento das rodas antes de viagens longas.'),
+    ],
+    'health': [
+        ('Saúde do Motor',
+         'Monitoramento preventivo: temperatura de trabalho do {brand} {model} está dentro dos padrões, mas recomendamos checagem do sistema de arrefecimento a cada 20 mil km.'),
+        ('Sensores e Emissões',
+         'A sonda lambda deve ser inspecionada aos 80 mil km. Uma sonda desgastada pode aumentar o consumo em até 20% e danificar o catalisador.'),
+    ],
+    'obd': [
+        ('Insight OBD-II',
+         'Sua varredura OBD-II mais recente mostrou {dtc_count} códigos pendentes. Acompanhe a evolução antes do próximo diagnóstico completo.'),
+    ],
+}
+
+
+def _now_iso():
+    return datetime.now().isoformat(timespec='seconds')
+
+
+def _days_until_next_km(current_km, target_km, daily_avg_km):
+    remaining = max(0, target_km - current_km)
+    if daily_avg_km <= 0:
+        return None, remaining
+    days = int(round(remaining / daily_avg_km))
+    return days, remaining
+
+
+def _persist_notification(user_id, vehicle_id, title, description, notif_type, priority, ai=False, premium=False, action=None, payload=None):
+    existing = Notification.query.filter_by(
+        user_id=user_id,
+        title=title,
+        read=False
+    ).first()
+    if existing:
+        return existing
+
+    record = Notification(
+        user_id=user_id,
+        vehicle_id=vehicle_id,
+        title=title,
+        description=description,
+        notification_type=notif_type,
+        priority=priority,
+        read=False,
+        ai_generated=ai,
+        premium_only=premium,
+        action=action,
+        payload=payload or {},
+        created_at=_now_iso()
+    )
+    db.session.add(record)
+    return record
+
+
+def _static_ai_insight_generator(user, vehicle, usage_type_str):
+    daily_avg = 50 if usage_type_str == 'Urbano' else (120 if usage_type_str == 'Rodoviário' else 80)
+    current_km = vehicle.mileage or 0
+    brand = vehicle.brand or 'veículo'
+    model = vehicle.model or ''
+    fuel = vehicle.fuel_type or 'Gasolina'
+
+    insights = []
+
+    km_to_next_oil = 10000 - (current_km % 10000)
+    if km_to_next_oil < 2000:
+        title_base, desc_base = STATIC_AI_INSIGHTS_BY_CATEGORY['maintenance'][1]
+        insights.append({
+            'title': title_base,
+            'description': desc_base.format(km_left=km_to_next_oil),
+            'type': NOTIFICATION_TYPES['PREMIUM_INSIGHT'],
+            'priority': NOTIFICATION_PRIORITY['HIGH'],
+            'action': 'checklist',
+        })
+
+    title_base, desc_base = STATIC_AI_INSIGHTS_BY_CATEGORY['maintenance'][0]
+    insights.append({
+        'title': title_base,
+        'description': desc_base.format(usage_type=usage_type_str),
+        'type': NOTIFICATION_TYPES['MAINTENANCE_REMINDER'],
+        'priority': NOTIFICATION_PRIORITY['MEDIUM'],
+        'action': 'parts',
+    })
+
+    title_base, desc_base = STATIC_AI_INSIGHTS_BY_CATEGORY['fuel'][0]
+    insights.append({
+        'title': title_base,
+        'description': desc_base.format(brand=brand, model=model),
+        'type': NOTIFICATION_TYPES['FUEL_ALERT'],
+        'priority': NOTIFICATION_PRIORITY['LOW'],
+        'action': 'report',
+    })
+
+    title_base, desc_base = STATIC_AI_INSIGHTS_BY_CATEGORY['fuel'][1]
+    insights.append({
+        'title': title_base,
+        'description': desc_base.format(fuel_type=fuel),
+        'type': NOTIFICATION_TYPES['FUEL_ALERT'],
+        'priority': NOTIFICATION_PRIORITY['LOW'],
+    })
+
+    title_base, desc_base = STATIC_AI_INSIGHTS_BY_CATEGORY['driving'][0]
+    insights.append({
+        'title': title_base,
+        'description': desc_base,
+        'type': NOTIFICATION_TYPES['VEHICLE_TIP'],
+        'priority': NOTIFICATION_PRIORITY['LOW'],
+    })
+
+    title_base, desc_base = STATIC_AI_INSIGHTS_BY_CATEGORY['health'][0]
+    insights.append({
+        'title': title_base,
+        'description': desc_base.format(brand=brand, model=model),
+        'type': NOTIFICATION_TYPES['PREMIUM_INSIGHT'],
+        'priority': NOTIFICATION_PRIORITY['MEDIUM'],
+        'action': 'obd',
+    })
+
+    title_base, desc_base = STATIC_AI_INSIGHTS_BY_CATEGORY['health'][1]
+    insights.append({
+        'title': title_base,
+        'description': desc_base,
+        'type': NOTIFICATION_TYPES['PREMIUM_INSIGHT'],
+        'priority': NOTIFICATION_PRIORITY['LOW'],
+    })
+
+    recent_scans = OBDScan.query.filter_by(vehicle_id=vehicle.id).order_by(OBDScan.id.desc()).limit(1).all()
+    if recent_scans and recent_scans[0].dtc_codes and len(recent_scans[0].dtc_codes) > 0:
+        title_base, desc_base = STATIC_AI_INSIGHTS_BY_CATEGORY['obd'][0]
+        insights.append({
+            'title': title_base,
+            'description': desc_base.format(dtc_count=len(recent_scans[0].dtc_codes)),
+            'type': NOTIFICATION_TYPES['OBD_ALERT'],
+            'priority': NOTIFICATION_PRIORITY['HIGH'],
+            'action': 'obd',
+        })
+
+    return insights
+
+
+def _ai_prompt_generator(user, vehicle, usage_type_str):
+    return f"""
+    Você é um assistente de manutenção automotiva experiente, especializado em percepção preditiva e recomendações inteligentes.
+    Gere de 5 a 8 notificações personalizadas para o dono do veículo abaixo.
+
+    DADOS DO USUÁRIO:
+    - Nome: {user.full_name}
+    - Plano PREMIUM
+    - Frequência de lembretes: {user.reminder_frequency}
+
+    DADOS DO VEÍCULO:
+    - Marca: {vehicle.brand}
+    - Modelo: {vehicle.model}
+    - Ano: {vehicle.year}
+    - Motorização: {vehicle.engine_type}
+    - Transmissão: {vehicle.transmission}
+    - Combustível: {vehicle.fuel_type}
+    - Perfil de Uso: {usage_type_str}
+    - Quilometragem atual: {vehicle.mileage or 0} km
+    - Última troca de óleo (km): {vehicle.last_oil_change or 0}
+    - Última troca de correia (km): {vehicle.last_belt_change or 0}
+    - Última troca de freios (km): {vehicle.last_brake_change or 0}
+
+    REGRAS:
+    1. Responda APENAS com um JSON no formato abaixo, sem texto adicional.
+    2. NOTIFICAÇÕES DEVEM SER PREDITIVAS e baseadas em engenharia automotiva real (ex: intervalo de troca de óleo em 10mil km para veículos a gasolina).
+    3. Priorize: trocas prestes a vencer (menos de 2000km), dicas de economia para combustível do veículo, análise do perfil de direção, recomendações de sazonalidade.
+    4. Cada notificação deve ter um nível de prioridade: 'low', 'medium', 'high', 'critical'.
+    5. Tipos válidos de notificação: 'maintenance', 'obd', 'tip', 'milestone', 'premium', 'fuel'.
+
+    FORMATO JSON OBRIGATÓRIO:
+    [
+      {{
+        "title": "Título curto",
+        "description": "Texto explicativo de 2 a 3 frases, personalizado.",
+        "type": "tip | maintenance | fuel | premium | obd | milestone",
+        "priority": "low | medium | high | critical",
+        "action": "obd | checklist | parts | report | null"
+      }}
+    ]
+    """
+
+
+def _ai_insight_generator(user, vehicle, usage_type_str):
+    if not ai_client:
+        return _static_ai_insight_generator(user, vehicle, usage_type_str)
+
+    try:
+        prompt = _ai_prompt_generator(user, vehicle, usage_type_str)
+        completion = ai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            temperature=0.6,
+            max_tokens=2400,
+            response_format={"type": "json_object"},
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Você é um engenheiro mecânico automotivo sênior especializado em manutenção preventiva e preditiva. Responde somente JSON válido."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            timeout=60,
+        )
+        raw = completion.choices[0].message.content or ''
+        parsed = __import__('json').loads(raw)
+        items = parsed.get('notifications') if isinstance(parsed, dict) else parsed
+        if not isinstance(items, list):
+            return _static_ai_insight_generator(user, vehicle, usage_type_str)
+
+        cleaned = []
+        for entry in items[:PREMIUM_AI_NOTIFICATION_LIMIT]:
+            entry_type = entry.get('type') or NOTIFICATION_TYPES['VEHICLE_TIP']
+            valid_types = set(NOTIFICATION_TYPES.values())
+            if entry_type not in valid_types:
+                entry_type = NOTIFICATION_TYPES['VEHICLE_TIP']
+            priority = entry.get('priority') or NOTIFICATION_PRIORITY['MEDIUM']
+            valid_priority = set(NOTIFICATION_PRIORITY.values())
+            if priority not in valid_priority:
+                priority = NOTIFICATION_PRIORITY['MEDIUM']
+            cleaned.append({
+                'title': str(entry.get('title') or 'Insight Premium').strip()[:120],
+                'description': str(entry.get('description') or '').strip()[:500],
+                'type': entry_type,
+                'priority': priority,
+                'action': entry.get('action') if entry.get('action') in ('obd', 'checklist', 'parts', 'report') else None,
+            })
+        if not cleaned:
+            return _static_ai_insight_generator(user, vehicle, usage_type_str)
+        return cleaned
+    except Exception as e:
+        print(f"AI insight generation falhou, usando fallback estático: {str(e)}")
+        return _static_ai_insight_generator(user, vehicle, usage_type_str)
+
+
+def _seed_basic_notifications(user, vehicle):
+    created_any = False
+    created_count = Notification.query.filter_by(user_id=user.id).count()
+    if created_count == 0:
+        _persist_notification(
+            user.id, vehicle and vehicle.id,
+            'Bem-vindo(a) ao AMP!',
+            f'Olá {user.full_name.split()[0] if user.full_name else ""}! Cadastre seu veículo e comece a usar o diagnóstico OBD-II para monitorar a saúde do seu carro em tempo real.',
+            NOTIFICATION_TYPES['SYSTEM'],
+            NOTIFICATION_PRIORITY['LOW'],
+            ai=False,
+            premium=False,
+        )
+        created_any = True
+    return created_any
+
+
+def generate_smart_notifications(user, force_refresh=False):
+    vehicle = Vehicle.query.filter_by(user_id=user.id).order_by(Vehicle.id.desc()).first()
+    if not vehicle:
+        _seed_basic_notifications(user, None)
+        try:
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+        return
+
+    usage_type_str = vehicle.usage_type or 'Misto'
+    current_km = vehicle.mileage or 0
+
+    if force_refresh:
+        Notification.query.filter_by(
+            user_id=user.id,
+            ai_generated=True,
+            premium_only=True
+        ).delete(synchronize_session=False)
+
+    changed = _seed_basic_notifications(user, vehicle)
+
+    next_oil = (vehicle.last_oil_change or 0) + 10000
+    if next_oil - current_km <= 2000:
+        days_left, km_left = _days_until_next_km(current_km, next_oil, 60)
+        _persist_notification(
+            user.id, vehicle.id,
+            'Troca de Óleo Próxima',
+            f'Faltam apenas {km_left} km para a troca recomendada de óleo. Este período crítico pode aumentar o desgaste do motor se ignorado.',
+            NOTIFICATION_TYPES['MAINTENANCE_REMINDER'],
+            NOTIFICATION_PRIORITY['HIGH'],
+            payload={'next_km': next_oil, 'current_km': current_km, 'days_left': days_left},
+            action='checklist'
+        )
+        changed = True
+
+    if (vehicle.last_belt_change or 0) > 0:
+        next_belt = (vehicle.last_belt_change or 0) + 50000
+        if next_belt - current_km <= 5000:
+            _persist_notification(
+                user.id, vehicle.id,
+                'Correia Dentada: Atenção!',
+                'Você está próximo do limite recomendado para a troca da correia dentada. A quebra em movimento pode danificar seriamente o motor.',
+                NOTIFICATION_TYPES['MAINTENANCE_REMINDER'],
+                NOTIFICATION_PRIORITY['CRITICAL'],
+                payload={'next_km': next_belt},
+                action='parts'
+            )
+            changed = True
+
+    recent_maint = MaintenanceHistory.query.filter_by(vehicle_id=vehicle.id).count()
+    if recent_maint == 0 and current_km > 5000:
+        _persist_notification(
+            user.id, vehicle.id,
+            'Registre seu Histórico',
+            'Adicione os serviços já feitos no seu carro no histórico de manutenção. Isso ajuda a IA a gerar recomendações ainda mais precisas.',
+            NOTIFICATION_TYPES['SYSTEM'],
+            NOTIFICATION_PRIORITY['LOW'],
+            action='checklist'
+        )
+        changed = True
+
+    if user.is_premium:
+        current_premium_ai_count = Notification.query.filter_by(
+            user_id=user.id,
+            ai_generated=True,
+            premium_only=True,
+        ).count()
+        if current_premium_ai_count < PREMIUM_AI_NOTIFICATION_LIMIT:
+            insights = _ai_insight_generator(user, vehicle, usage_type_str)
+            for insight in insights:
+                remaining = PREMIUM_AI_NOTIFICATION_LIMIT - Notification.query.filter_by(
+                    user_id=user.id, ai_generated=True, premium_only=True
+                ).count()
+                if remaining <= 0:
+                    break
+                _persist_notification(
+                    user.id, vehicle.id,
+                    insight['title'],
+                    insight['description'],
+                    insight['type'],
+                    insight['priority'],
+                    ai=True,
+                    premium=True,
+                    action=insight.get('action'),
+                )
+                changed = True
+            _persist_notification(
+                user.id, vehicle.id,
+                'Análise Premium Atualizada ✨',
+                f'Foram gerados insights personalizados por IA para o seu {vehicle.brand} {vehicle.model}. Confira as recomendações abaixo!',
+                NOTIFICATION_TYPES['PREMIUM_INSIGHT'],
+                NOTIFICATION_PRIORITY['MEDIUM'],
+                ai=True,
+                premium=True,
+            )
+            changed = True
+
+    if changed:
+        try:
+            db.session.commit()
+        except Exception as e:
+            print(f"Erro ao salvar notificações geradas: {str(e)}")
+            db.session.rollback()
 
 user_bp = Blueprint('user', __name__)
 
@@ -208,8 +599,67 @@ def get_user_notifications(user_id):
     if not user:
         return jsonify({'error': 'Usuário não encontrado'}), 404
 
-    notifications = []  # Placeholder for notifications
-    return jsonify({'notifications': notifications}), 200
+    try:
+        from app import db as _db
+        _inspector = _db.inspect(_db.engine)
+        if 'notification' not in _inspector.get_table_names():
+            print("Tabela notification não existe, criando via fallback...")
+            try:
+                Notification.__table__.create(bind=_db.engine, checkfirst=True)
+            except Exception as table_err:
+                print(f"Erro ao criar tabela notification: {table_err}")
+    except Exception:
+        pass
+
+    force_refresh = request.args.get('refresh', 'false').lower() in ('1', 'true', 'yes', 's')
+
+    try:
+        generate_smart_notifications(user, force_refresh=force_refresh)
+    except Exception as e:
+        print(f"Erro ao gerar notificações inteligentes: {str(e)}")
+
+    try:
+        query = Notification.query.filter_by(user_id=user.id)
+        if not user.is_premium:
+            query = query.filter(Notification.premium_only == False)
+        notifications = query.order_by(
+            Notification.priority.desc() if hasattr(Notification.priority, 'desc') else Notification.id.desc(),
+            Notification.id.desc()
+        ).limit(50).all()
+
+        unread_count = 0
+        for n in notifications:
+            if not n.read:
+                unread_count += 1
+
+        notification_dicts = []
+        for n in notifications:
+            try:
+                notification_dicts.append(n.to_dict())
+            except Exception:
+                pass
+
+        return jsonify({
+            'notifications': notification_dicts,
+            'unread_count': unread_count,
+            'total_count': len(notification_dicts),
+            'is_premium': bool(user.is_premium),
+        }), 200
+    except Exception as e:
+        print(f"Erro ao carregar notificações do banco: {str(e)}")
+        fallback = []
+        if Notification.query.count() == 0:
+            fallback.append({
+                'id': 'fallback-welcome',
+                'title': 'Bem-vindo(a) ao AMP!',
+                'description': f'Olá {user.full_name.split()[0] if user.full_name else ""}! Assim que você cadastrar seu veículo, as notificações inteligentes começarão a aparecer aqui.',
+                'type': NOTIFICATION_TYPES['SYSTEM'],
+                'priority': NOTIFICATION_PRIORITY['LOW'],
+                'read': False,
+                'time': _now_iso(),
+                'created_at': _now_iso(),
+            })
+        return jsonify({'notifications': fallback, 'unread_count': 1 if fallback else 0}), 200
 
 
 @user_bp.route('/user/notifications/<int:user_id>/read-all', methods=['PATCH'])
@@ -218,7 +668,51 @@ def mark_all_notifications_read(user_id):
     if not user:
         return jsonify({'error': 'Usuário não encontrado'}), 404
 
-    return jsonify({'message': 'Notificações marcadas como lidas'}), 200
+    try:
+        updated = Notification.query.filter_by(
+            user_id=user.id,
+            read=False
+        ).update({'read': True}, synchronize_session=False)
+        db.session.commit()
+        return jsonify({
+            'message': 'Notificações marcadas como lidas',
+            'updated_count': int(updated or 0)
+        }), 200
+    except Exception as e:
+        db.session.rollback()
+        print(f"Erro ao marcar notificações como lidas: {str(e)}")
+        return jsonify({'error': str(e), 'message': 'Notificações marcadas como lidas'}), 200
+
+
+@user_bp.route('/user/notifications/<int:user_id>/<int:notif_id>/read', methods=['PATCH'])
+def mark_single_notification_read(user_id, notif_id):
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({'error': 'Usuário não encontrado'}), 404
+
+    notification = Notification.query.filter_by(id=notif_id, user_id=user.id).first()
+    if not notification:
+        return jsonify({'error': 'Notificação não encontrada'}), 404
+
+    notification.read = True
+    db.session.commit()
+    return jsonify({'message': 'Notificação marcada como lida'}), 200
+
+
+@user_bp.route('/user/notifications/<int:user_id>/ai/generate', methods=['POST'])
+def regenerate_ai_notifications(user_id):
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({'error': 'Usuário não encontrado'}), 404
+    if not user.is_premium:
+        return jsonify({'error': 'Funcionalidade exclusiva do plano PREMIUM'}), 403
+
+    try:
+        generate_smart_notifications(user, force_refresh=True)
+        return jsonify({'message': 'Notificações IA regeneradas com sucesso'}), 200
+    except Exception as e:
+        print(f"Erro ao regenerar notificações IA: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 
 @user_bp.route('/user/set-plan/<int:user_id>', methods=['POST'])
@@ -232,9 +726,16 @@ def set_user_plan(user_id):
     if plan_type not in PLAN_VEHICLE_LIMITS:
         return jsonify({'error': f'Plano inválido. Opções: {list(PLAN_VEHICLE_LIMITS.keys())}'}), 400
 
+    was_premium = bool(user.is_premium)
     user.plan_type = plan_type
     user.is_premium = plan_type != 'free'
     db.session.commit()
+
+    if not was_premium and user.is_premium:
+        try:
+            generate_smart_notifications(user, force_refresh=True)
+        except Exception as e:
+            print(f"Aviso: Não foi possível gerar notificações premium após upgrade: {str(e)}")
 
     return jsonify({
         'message': 'Plano atualizado com sucesso',

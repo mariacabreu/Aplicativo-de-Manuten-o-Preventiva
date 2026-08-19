@@ -218,28 +218,65 @@ const VehicleEditScreen = ({ navigation, route }) => {
       return;
     }
 
+    if (!vehicle?.id) {
+      setAlertModalData({
+        type: 'error',
+        title: 'Erro',
+        message: 'Veículo inválido para edição. Tente recarregar a tela.',
+        confirmButtonText: 'Ok',
+        onConfirm: () => setAlertModalVisible(false),
+      });
+      setAlertModalVisible(true);
+      return;
+    }
+
+    const parsedYear = parseInt(selectedYear, 10);
+    if (Number.isNaN(parsedYear)) {
+      setAlertModalData({
+        type: 'error',
+        title: 'Erro',
+        message: 'Ano do veículo é inválido.',
+        confirmButtonText: 'Ok',
+        onConfirm: () => setAlertModalVisible(false),
+      });
+      setAlertModalVisible(true);
+      return;
+    }
+
+    const parsedMileage = mileage && mileage.toString().trim() !== ''
+      ? parseInt(mileage.toString().replace(/\D/g, ''), 10)
+      : 0;
+
     try {
       setSavingVehicle(true);
-      const response = await axios.put(`${API_BASE_URL}/vehicle/${vehicle.id}`, {
-        brand: selectedBrand,
-        model: selectedModel,
-        year: parseInt(selectedYear),
-        transmission,
-        engine_type: engineType,
-        usage_type: usageType,
-        mileage: mileage ? parseInt(mileage) : 0,
-        fuel_type: fuelType,
-        user_id: user?.id
+      const payload = {
+        brand: selectedBrand ? selectedBrand.toString().trim() : '',
+        model: selectedModel ? selectedModel.toString().trim() : '',
+        year: Number.isNaN(parsedYear) ? vehicle.year : parsedYear,
+        transmission: transmission || '',
+        engine_type: engineType || '',
+        usage_type: usageType || 'Misto',
+        mileage: Number.isNaN(parsedMileage) ? 0 : parsedMileage,
+        fuel_type: fuelType || ''
+      };
+
+      console.log(`PUT /vehicle/${vehicle.id} payload:`, payload);
+
+      const response = await axios.put(`${API_BASE_URL}/vehicle/${vehicle.id}`, payload, {
+        timeout: 15000,
+        headers: {
+          'Content-Type': 'application/json'
+        }
       });
 
       if (response.data?.vehicle) {
         setVehicle(response.data.vehicle);
       }
-      
+
       setAlertModalData({
         type: 'success',
         title: 'Sucesso',
-        message: 'Veículo atualizado com sucesso!',
+        message: response.data?.message || 'Veículo atualizado com sucesso!',
         confirmButtonText: 'Ok',
         onConfirm: () => {
           setAlertModalVisible(false);
@@ -249,8 +286,15 @@ const VehicleEditScreen = ({ navigation, route }) => {
       });
       setAlertModalVisible(true);
     } catch (error) {
-      console.error('Erro ao salvar veículo:', error.response?.data || error.message);
-      const message = error.response?.data?.error || 'Erro ao salvar veículo';
+      console.error('Erro ao salvar veículo:', error?.response?.data || error?.message || error);
+      let message = 'Erro ao salvar veículo. Tente novamente.';
+      if (error?.response?.data?.error) {
+        message = error.response.data.error;
+      } else if (error?.message?.includes('Network') || error?.code === 'ERR_NETWORK') {
+        message = 'Erro de conexão. Verifique sua internet e tente novamente.';
+      } else if (error?.code === 'ECONNABORTED') {
+        message = 'Tempo limite excedido. Tente novamente.';
+      }
       setAlertModalData({
         type: 'error',
         title: 'Erro',
