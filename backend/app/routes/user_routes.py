@@ -63,7 +63,62 @@ def _days_until_next_km(current_km, target_km, daily_avg_km):
     return days, remaining
 
 
-def _persist_notification(user_id, vehicle_id, title, description, notif_type, priority, ai=False, premium=False, action=None, payload=None):
+FREQUENCY_HOURS = {
+    'daily': 24,
+    'weekly': 168,
+    'biweekly': 336,
+    'monthly': 720,
+}
+
+
+def _should_regenerate_for_user(user, force_refresh=False):
+    if force_refresh:
+        return True
+    if not user.last_notif_generation:
+        return True
+    try:
+        last = datetime.fromisoformat(user.last_notif_generation)
+    except Exception:
+        return True
+    hours = FREQUENCY_HOURS.get(user.reminder_frequency, FREQUENCY_HOURS['biweekly'])
+    if user.is_premium and user.premium_smart_frequency:
+        hours = max(6, hours // 2)
+    return (datetime.now() - last).total_seconds() >= (hours * 3600)
+
+
+def _user_allows_notification_type(user, notif_type, ai_generated=False):
+    if not bool(getattr(user, 'notifications_enabled', True)):
+        if notif_type != NOTIFICATION_TYPES['SYSTEM']:
+            return False
+    type_map = {
+        NOTIFICATION_TYPES['MAINTENANCE_REMINDER']: 'notif_maintenance',
+        NOTIFICATION_TYPES['OBD_ALERT']: 'notif_obd',
+        NOTIFICATION_TYPES['FUEL_ALERT']: 'notif_fuel',
+        NOTIFICATION_TYPES['VEHICLE_TIP']: 'notif_tips',
+        NOTIFICATION_TYPES['MILESTONE']: 'notif_milestones',
+        NOTIFICATION_TYPES['SYSTEM']: 'notif_system',
+        NOTIFICATION_TYPES['PREMIUM_INSIGHT']: 'premium_ai_insights',
+    }
+    pref = type_map.get(notif_type)
+    if pref is None:
+        return True
+    if not getattr(user, pref, True):
+        return False
+    if ai_generated and user.is_premium:
+        category = None
+        if notif_type in (NOTIFICATION_TYPES['PREMIUM_INSIGHT'],):
+            category = 'premium_ai_insights'
+        if category and not getattr(user, category, True):
+            return False
+    return True
+
+
+def _persist_notification(user, vehicle_id, title, description, notif_type, priority, ai=False, premium=False, action=None, payload=None):
+    if not _user_allows_notification_type(user, notif_type, ai_generated=ai):
+        return None
+    if premium and not user.is_premium:
+        return None
+    user_id = user.id
     existing = Notification.query.filter_by(
         user_id=user_id,
         title=title,
@@ -289,10 +344,36 @@ def _seed_basic_notifications(user, vehicle):
     return created_any
 
 
+def _filter_ai_insights_by_preferences(user, insights):
+    if not user.is_premium:
+        return []
+    filtered = []
+    for ins in insights:
+        t = ins.get('type')
+        keep = True
+        if t in (NOTIFICATION_TYPES['FUEL_ALERT'], NOTIFICATION_TYPES['VEHICLE_TIP']):
+            if not user.premium_driving_analysis:
+                keep = False
+        if t == NOTIFICATION_TYPES['PREMIUM_INSIGHT'] and not user.premium_ai_insights:
+            keep = False
+        if ins.get('priority') in (NOTIFICATION_PRIORITY['HIGH'], NOTIFICATION_PRIORITY['CRITICAL']):
+            if not user.premium_predictive:
+                keep = False
+        if not _user_allows_notification_type(user, t, ai_generated=True):
+            keep = False
+        if keep:
+            filtered.append(ins)
+    return filtered
+
+
 def generate_smart_notifications(user, force_refresh=False):
+    if not _should_regenerate_for_user(user, force_refresh=force_refresh):
+        return
+
     vehicle = Vehicle.query.filter_by(user_id=user.id).order_by(Vehicle.id.desc()).first()
     if not vehicle:
         _seed_basic_notifications(user, None)
+        user.last_notif_generation = _now_iso()
         try:
             db.session.commit()
         except Exception:
@@ -314,8 +395,8 @@ def generate_smart_notifications(user, force_refresh=False):
     next_oil = (vehicle.last_oil_change or 0) + 10000
     if next_oil - current_km <= 2000:
         days_left, km_left = _days_until_next_km(current_km, next_oil, 60)
-        _persist_notification(
-            user.id, vehicle.id,
+        rec = _persist_notification(
+            user, vehicle.id,
             'Troca de Óleo Próxima',
             f'Faltam apenas {km_left} km para a troca recomendada de óleo. Este período crítico pode aumentar o desgaste do motor se ignorado.',
             NOTIFICATION_TYPES['MAINTENANCE_REMINDER'],
@@ -323,13 +404,14 @@ def generate_smart_notifications(user, force_refresh=False):
             payload={'next_km': next_oil, 'current_km': current_km, 'days_left': days_left},
             action='checklist'
         )
-        changed = True
+        if rec is not None:
+            changed = True
 
     if (vehicle.last_belt_change or 0) > 0:
         next_belt = (vehicle.last_belt_change or 0) + 50000
         if next_belt - current_km <= 5000:
-            _persist_notification(
-                user.id, vehicle.id,
+            rec = _persist_notification(
+                user, vehicle.id,
                 'Correia Dentada: Atenção!',
                 'Você está próximo do limite recomendado para a troca da correia dentada. A quebra em movimento pode danificar seriamente o motor.',
                 NOTIFICATION_TYPES['MAINTENANCE_REMINDER'],
@@ -337,19 +419,21 @@ def generate_smart_notifications(user, force_refresh=False):
                 payload={'next_km': next_belt},
                 action='parts'
             )
-            changed = True
+            if rec is not None:
+                changed = True
 
     recent_maint = MaintenanceHistory.query.filter_by(vehicle_id=vehicle.id).count()
     if recent_maint == 0 and current_km > 5000:
-        _persist_notification(
-            user.id, vehicle.id,
+        rec = _persist_notification(
+            user, vehicle.id,
             'Registre seu Histórico',
             'Adicione os serviços já feitos no seu carro no histórico de manutenção. Isso ajuda a IA a gerar recomendações ainda mais precisas.',
             NOTIFICATION_TYPES['SYSTEM'],
             NOTIFICATION_PRIORITY['LOW'],
             action='checklist'
         )
-        changed = True
+        if rec is not None:
+            changed = True
 
     if user.is_premium:
         current_premium_ai_count = Notification.query.filter_by(
@@ -358,15 +442,16 @@ def generate_smart_notifications(user, force_refresh=False):
             premium_only=True,
         ).count()
         if current_premium_ai_count < PREMIUM_AI_NOTIFICATION_LIMIT:
-            insights = _ai_insight_generator(user, vehicle, usage_type_str)
+            raw_insights = _ai_insight_generator(user, vehicle, usage_type_str)
+            insights = _filter_ai_insights_by_preferences(user, raw_insights)
             for insight in insights:
                 remaining = PREMIUM_AI_NOTIFICATION_LIMIT - Notification.query.filter_by(
                     user_id=user.id, ai_generated=True, premium_only=True
                 ).count()
                 if remaining <= 0:
                     break
-                _persist_notification(
-                    user.id, vehicle.id,
+                rec = _persist_notification(
+                    user, vehicle.id,
                     insight['title'],
                     insight['description'],
                     insight['type'],
@@ -375,17 +460,22 @@ def generate_smart_notifications(user, force_refresh=False):
                     premium=True,
                     action=insight.get('action'),
                 )
-                changed = True
-            _persist_notification(
-                user.id, vehicle.id,
-                'Análise Premium Atualizada ✨',
-                f'Foram gerados insights personalizados por IA para o seu {vehicle.brand} {vehicle.model}. Confira as recomendações abaixo!',
-                NOTIFICATION_TYPES['PREMIUM_INSIGHT'],
-                NOTIFICATION_PRIORITY['MEDIUM'],
-                ai=True,
-                premium=True,
-            )
-            changed = True
+                if rec is not None:
+                    changed = True
+            if insights and user.premium_ai_insights:
+                rec = _persist_notification(
+                    user, vehicle.id,
+                    'Análise Premium Atualizada ✨',
+                    f'Foram gerados insights personalizados por IA para o seu {vehicle.brand} {vehicle.model}. Confira as recomendações abaixo!',
+                    NOTIFICATION_TYPES['PREMIUM_INSIGHT'],
+                    NOTIFICATION_PRIORITY['MEDIUM'],
+                    ai=True,
+                    premium=True,
+                )
+                if rec is not None:
+                    changed = True
+
+    user.last_notif_generation = _now_iso()
 
     if changed:
         try:
@@ -541,6 +631,16 @@ def get_user_vehicles(user_id):
     return jsonify({'vehicles': [v.to_dict() for v in vehicles]}), 200
 
 
+NOTIFICATION_PREF_FIELDS = [
+    'notifications_enabled',
+    'notif_maintenance', 'notif_obd', 'notif_fuel',
+    'notif_tips', 'notif_milestones', 'notif_system',
+    'premium_ai_insights', 'premium_predictive',
+    'premium_driving_analysis', 'premium_seasonal',
+    'premium_smart_frequency',
+]
+
+
 @user_bp.route('/user/<int:user_id>', methods=['GET', 'PUT', 'PATCH'])
 def get_or_update_user(user_id):
     user = User.query.get(user_id)
@@ -548,7 +648,7 @@ def get_or_update_user(user_id):
         return jsonify({'error': 'Usuário não encontrado'}), 404
 
     if request.method in ['PUT', 'PATCH']:
-        data = request.json
+        data = request.json or {}
         if 'full_name' in data:
             user.full_name = data['full_name']
         if 'email' in data:
@@ -559,11 +659,87 @@ def get_or_update_user(user_id):
             user.reminder_frequency = data['reminder_frequency']
         if 'avatar' in data:
             user.avatar = data['avatar']
+        for field in NOTIFICATION_PREF_FIELDS:
+            if field in data:
+                try:
+                    setattr(user, field, bool(data[field]))
+                except Exception:
+                    pass
 
         db.session.commit()
         return jsonify({'message': 'Usuário atualizado com sucesso', 'user': user.to_dict()}), 200
 
     return jsonify(user.to_dict()), 200
+
+
+@user_bp.route('/user/<int:user_id>/notification-preferences', methods=['GET', 'PUT', 'PATCH'])
+def notification_preferences(user_id):
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({'error': 'Usuário não encontrado'}), 404
+
+    if request.method in ['PUT', 'PATCH']:
+        data = request.json or {}
+        if 'reminder_frequency' in data:
+            user.reminder_frequency = data['reminder_frequency']
+        for field in NOTIFICATION_PREF_FIELDS:
+            if field in data:
+                try:
+                    setattr(user, field, bool(data[field]))
+                except Exception:
+                    pass
+        try:
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            return jsonify({'error': str(e)}), 500
+
+    prefs = {f: bool(getattr(user, f, True)) for f in NOTIFICATION_PREF_FIELDS}
+    prefs['reminder_frequency'] = user.reminder_frequency
+    return jsonify({
+        'preferences': prefs,
+        'is_premium': bool(user.is_premium),
+        'last_generation': user.last_notif_generation,
+    }), 200
+
+
+@user_bp.route('/user/notifications/<int:user_id>/periodic-check', methods=['POST'])
+def periodic_notification_check(user_id):
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({'error': 'Usuário não encontrado'}), 404
+
+    force = (request.json or {}).get('force', False)
+    should_run = _should_regenerate_for_user(user, force_refresh=force)
+
+    if not should_run:
+        return jsonify({
+            'skipped': True,
+            'reason': 'Frequência mínima não atingida',
+            'last_generation': user.last_notif_generation,
+        }), 200
+
+    try:
+        generate_smart_notifications(user, force_refresh=force)
+    except Exception as e:
+        print(f"Erro no trigger periódico: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+    try:
+        query = Notification.query.filter_by(user_id=user.id)
+        if not user.is_premium:
+            query = query.filter(Notification.premium_only == False)
+        notifications = query.order_by(Notification.id.desc()).limit(20).all()
+        unread = sum(1 for n in notifications if not n.read)
+        return jsonify({
+            'generated': True,
+            'unread_count': unread,
+            'total': len(notifications),
+            'is_premium': bool(user.is_premium),
+            'notifications_enabled': bool(user.notifications_enabled),
+        }), 200
+    except Exception as e:
+        return jsonify({'generated': True, 'error': str(e)}), 200
 
 
 @user_bp.route('/users', methods=['GET'])

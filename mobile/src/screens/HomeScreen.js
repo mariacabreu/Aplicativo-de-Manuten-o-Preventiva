@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { View, StyleSheet, ScrollView, Platform, Alert } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import axios from 'axios';
@@ -9,6 +9,7 @@ import Header from '../components/Header/Header';
 import WelcomeBanner from '../components/Home/WelcomeBanner';
 import DashboardGrid from '../components/Home/DashboardGrid';
 import AMPAlertModal from '../components/Common/AMPAlertModal';
+import NotificationService from '../utils/NotificationService';
 
 const HomeScreen = ({ navigation, route }) => {
   const loggedUser = route.params?.user;
@@ -27,8 +28,7 @@ const HomeScreen = ({ navigation, route }) => {
   });
   const [avatarUri, setAvatarUri] = useState(loggedUser?.avatar_url || null);
   const [savingProfile, setSavingProfile] = useState(false);
-  
-  // Modal state
+
   const [modalVisible, setModalVisible] = useState(false);
   const [modalData, setModalData] = useState({
     type: 'info',
@@ -36,20 +36,49 @@ const HomeScreen = ({ navigation, route }) => {
     message: '',
   });
 
-  // ----- Estado do Header (notificações + plano/veículos) -----
   const [notifications, setNotifications] = useState([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const [planType, setPlanType] = useState(loggedUser?.plan_type || null);
-  const [vehicle, setVehicle] = useState(null); // Single vehicle
+  const [vehicle, setVehicle] = useState(null);
+  const [notificationsEnabled, setNotificationsEnabled] = useState(true);
+  const unsubscribedRef = useRef(null);
 
-  const hasCriticalNotif = notifications.some((n) => !n.read && n.priority && String(n.priority).toLowerCase() === 'critical');
+  const hasCriticalNotif = notificationsEnabled && notifications.some(
+    (n) => !n.read && n.priority && String(n.priority).toLowerCase() === 'critical'
+  );
 
   useEffect(() => {
-  console.log('loggedUser mudou:', loggedUser);
-  if (loggedUser?.id) {
-    fetchUserStatus();
-    fetchNotifications();
-  }
+    console.log('loggedUser mudou:', loggedUser);
+    if (loggedUser?.id) {
+      NotificationService.bootstrap(loggedUser.id, !!loggedUser?.is_premium).catch(() => {});
+      if (unsubscribedRef.current) {
+        try { unsubscribedRef.current(); } catch {}
+      }
+      const unsub = NotificationService.subscribe((evt) => {
+        if (typeof evt.unreadCount === 'number') setUnreadCount(evt.unreadCount);
+        if (Array.isArray(evt.notifications) && evt.notifications.length > 0) setNotifications(evt.notifications);
+        if (evt.prefs && typeof evt.prefs.notifications_enabled === 'boolean') {
+          setNotificationsEnabled(evt.prefs.notifications_enabled);
+        }
+      });
+      unsubscribedRef.current = unsub;
+
+      (async () => {
+        const prefs = await NotificationService.fetchPreferences();
+        if (prefs && typeof prefs.notifications_enabled === 'boolean') {
+          setNotificationsEnabled(prefs.notifications_enabled);
+        }
+      })();
+
+      fetchUserStatus();
+      fetchNotifications();
+      NotificationService.attemptPeriodicTrigger({ force: false }).catch(() => {});
+    }
+    return () => {
+      if (unsubscribedRef.current) {
+        try { unsubscribedRef.current(); unsubscribedRef.current = null; } catch {}
+      }
+    };
   }, [route.params?.user, loggedUser?.id]);
 
   const fetchUserStatus = async () => {
@@ -232,11 +261,7 @@ const HomeScreen = ({ navigation, route }) => {
     try {
       setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
       setUnreadCount(0);
-      await axios.patch(
-        `${API_BASE_URL}/user/notifications/${loggedUser.id}/read-all`,
-        {},
-        { timeout: 15000 }
-      ).catch((e) => console.warn('mark-all-read endpoint error (segue com UI atualizada):', e?.message || e));
+      await NotificationService.markAllAsRead();
     } catch (e) {
       console.error('markAllAsRead failed:', e);
     }
@@ -256,6 +281,7 @@ const HomeScreen = ({ navigation, route }) => {
         avatarUri={avatarUri}
         notifications={notifications}
         notificationCount={unreadCount}
+        notificationsEnabled={notificationsEnabled}
         onMarkAllAsRead={markAllAsRead}
         profileForm={profileForm}
         onChangeField={handleProfileFieldChange}
@@ -268,6 +294,7 @@ const HomeScreen = ({ navigation, route }) => {
         vehicle={vehicle}
         navigation={navigation}
         loggedUser={loggedUser}
+        hasCritical={hasCriticalNotif}
       />
 
       <ScrollView

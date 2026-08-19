@@ -78,6 +78,8 @@ const OBDScreen = ({ navigation, route }) => {
   const connectionRef = useRef(null);
   const commandQueueRef = useRef(Promise.resolve());
   const supportedPidsRef = useRef(new Set());
+  const lastSaveTimestampRef = useRef(0);
+  const pendingSaveRef = useRef(null);
   const [alertModalVisible, setAlertModalVisible] = useState(false);
   const [alertModalData, setAlertModalData] = useState({
     type: 'info',
@@ -603,7 +605,8 @@ const OBDScreen = ({ navigation, route }) => {
       if (gotRealData) {
         setLiveData(finalData);
         if (vehicle?.id) {
-          await saveOBDScanRecord([]);
+          const snapshotToSend = { ...finalData };
+          throttledSaveLive([], snapshotToSend, { minIntervalMs: 30000 });
         }
       }
     } catch (err) {
@@ -635,7 +638,16 @@ const OBDScreen = ({ navigation, route }) => {
       const codes = parseDTCResponse(resp);
 
       setDtcCodes(codes);
-      await saveOBDScanRecord(codes);
+      if (vehicle?.id) {
+        const currentLiveSnapshot = {};
+        Object.keys(liveData).forEach((k) => {
+          const v = liveData[k];
+          if (v !== 'N/D' && v !== null && v !== undefined) {
+            currentLiveSnapshot[k] = v;
+          }
+        });
+        saveOBDScanRecord(codes, currentLiveSnapshot);
+      }
     } catch (err) {
       console.error('Erro ao ler DTCs:', err);
       setDtcCodes([]);
@@ -651,19 +663,53 @@ const OBDScreen = ({ navigation, route }) => {
       setIsLoadingDTC(false);
     }
   };
-  const saveOBDScanRecord = async (dtcList) => {
+  const saveOBDScanRecord = async (dtcList, liveDataSnapshot) => {
     if (!vehicle?.id) return;
     try {
-      await axios.post(`${API_BASE_URL}/vehicle/obd-scan`, {
+      const liveDataToSend = {};
+      const sourceData = liveDataSnapshot || liveData;
+      const SENTINEL = 'N/D';
+      if (!sourceData) {
+      } else if (Array.isArray(sourceData)) {
+      } else {
+        Object.keys(sourceData).forEach((k) => {
+          const v = sourceData[k];
+          if (v !== SENTINEL && v !== null && v !== undefined && !Number.isNaN(Number(v) ? Number.isNaN(v) : false)) {
+            liveDataToSend[k] = v;
+          }
+        });
+      }
+      const payload = {
         vehicle_id: vehicle.id,
         scan_date: new Date().toISOString(),
-        dtc_codes: dtcList,
-        live_data: liveData,
-        connected_device: connectedDevice?.name || null
+        dtc_codes: Array.isArray(dtcList) ? dtcList : [],
+        live_data: liveDataToSend,
+        connected_device: connectedDevice?.name || null,
+      };
+      await axios.post(`${API_BASE_URL}/vehicle/obd-scan`, payload, {
+        timeout: 15000,
+        headers: { 'Content-Type': 'application/json' },
       });
     } catch (err) {
-      console.error('Erro ao salvar registro de scanner:', err);
+      console.error('Erro ao salvar registro de scanner:', err?.message || err);
     }
+  };
+
+  const throttledSaveLive = (dtcList, liveDataSnapshot, { minIntervalMs = 30000, force = false } = {}) => {
+    const now = Date.now();
+    const dtcCodesArr = Array.isArray(dtcList) ? dtcList : [];
+    const hasDTC = dtcCodesArr.length > 0;
+    if (!force && !hasDTC) {
+      if (now - lastSaveTimestampRef.current < minIntervalMs) {
+        pendingSaveRef.current = { dtcList: dtcCodesArr, liveDataSnapshot, timestamp: now };
+        return;
+      }
+    }
+    lastSaveTimestampRef.current = now;
+    if (pendingSaveRef.current) {
+      pendingSaveRef.current = null;
+    }
+    saveOBDScanRecord(dtcCodesArr, liveDataSnapshot || (pendingSaveRef.current?.liveDataSnapshot));
   };
 
   const handleScanDevices = async () => {
@@ -773,7 +819,19 @@ const OBDScreen = ({ navigation, route }) => {
         clearInterval(intervalRef.current);
       }
 
+      lastSaveTimestampRef.current = 0;
+      pendingSaveRef.current = null;
+
       await readLiveDataFromOBD();
+      if (vehicle?.id) {
+        const freshLive = {};
+        Object.entries(liveData).forEach(([k, v]) => {
+          if (v !== 'N/D' && v !== null && v !== undefined) freshLive[k] = v;
+        });
+        if (Object.keys(freshLive).length > 0) {
+          throttledSaveLive([], freshLive, { force: true });
+        }
+      }
 
       intervalRef.current = setInterval(() => {
         readLiveDataFromOBD();
@@ -805,6 +863,24 @@ const OBDScreen = ({ navigation, route }) => {
       clearInterval(intervalRef.current);
       intervalRef.current = null;
     }
+
+    if (vehicle?.id && isConnected) {
+      try {
+        const lastSnapshot = {};
+        Object.entries(liveData).forEach(([k, v]) => {
+          if (v !== 'N/D' && v !== null && v !== undefined) lastSnapshot[k] = v;
+        });
+        const lastDTC = Array.isArray(dtcCodes) ? dtcCodes : [];
+        if (Object.keys(lastSnapshot).length > 0 || lastDTC.length > 0) {
+          saveOBDScanRecord(lastDTC, lastSnapshot);
+        }
+      } catch (e) {
+        console.warn('Erro ao salvar último snapshot antes de desconectar:', e?.message || e);
+      }
+    }
+
+    pendingSaveRef.current = null;
+    lastSaveTimestampRef.current = 0;
 
     if (connectionRef.current) {
       try {

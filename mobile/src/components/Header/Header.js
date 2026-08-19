@@ -25,6 +25,7 @@ const Header = ({
   rightIcon,
   notifications,
   notificationCount = 0,
+  notificationsEnabled = true,
   onMarkAllAsRead,
   avatarUri,
   profileForm = { full_name: '', email: '', phone: '' },
@@ -44,7 +45,8 @@ const Header = ({
 }) => {
   const [notificationsVisible, setNotificationsVisible] = useState(false);
   const [profileVisible, setProfileVisible] = useState(false);
-  const safeCount = hasValidCount(notificationCount) ? Math.min(Number(notificationCount), 99) : 0;
+  const rawCount = hasValidCount(notificationCount) ? Math.min(Number(notificationCount), 99) : 0;
+  const safeCount = notificationsEnabled ? rawCount : 0;
 
   const handleLeftIconPress = () => {
     if (onLeftIconPress) {
@@ -64,6 +66,9 @@ const Header = ({
 
   const renderBellIcon = () => {
     if (leftIcon) return leftIcon;
+    if (!notificationsEnabled) {
+      return <Ionicons name="notifications-off-outline" size={26} color="#888888" />;
+    }
     if (safeCount <= 0) {
       return <Ionicons name="notifications-outline" size={26} color="#2C2C2C" />;
     }

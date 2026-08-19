@@ -11,6 +11,22 @@ class User(db.Model):
     reminder_frequency = db.Column(db.String(50), default='biweekly')
     phone = db.Column(db.String(20), nullable=True)
     avatar = db.Column(db.Text, nullable=True)  # Base64 encoded image or URL
+
+    notifications_enabled = db.Column(db.Boolean, default=True)
+    notif_maintenance = db.Column(db.Boolean, default=True)
+    notif_obd = db.Column(db.Boolean, default=True)
+    notif_fuel = db.Column(db.Boolean, default=True)
+    notif_tips = db.Column(db.Boolean, default=True)
+    notif_milestones = db.Column(db.Boolean, default=True)
+    notif_system = db.Column(db.Boolean, default=True)
+
+    premium_ai_insights = db.Column(db.Boolean, default=True)
+    premium_predictive = db.Column(db.Boolean, default=True)
+    premium_driving_analysis = db.Column(db.Boolean, default=True)
+    premium_seasonal = db.Column(db.Boolean, default=True)
+    premium_smart_frequency = db.Column(db.Boolean, default=True)
+    last_notif_generation = db.Column(db.String(50), nullable=True)
+
     vehicles = db.relationship('Vehicle', backref='owner', lazy=True, cascade='all, delete-orphan')
     notifications = db.relationship('Notification', backref='user', lazy=True, cascade='all, delete-orphan')
 
@@ -24,7 +40,20 @@ class User(db.Model):
             'plan_type': self.plan_type,
             'reminder_frequency': self.reminder_frequency,
             'avatar_url': self.avatar,
-            'avatar': self.avatar
+            'avatar': self.avatar,
+            'notifications_enabled': bool(self.notifications_enabled),
+            'notif_maintenance': bool(self.notif_maintenance),
+            'notif_obd': bool(self.notif_obd),
+            'notif_fuel': bool(self.notif_fuel),
+            'notif_tips': bool(self.notif_tips),
+            'notif_milestones': bool(self.notif_milestones),
+            'notif_system': bool(self.notif_system),
+            'premium_ai_insights': bool(self.premium_ai_insights),
+            'premium_predictive': bool(self.premium_predictive),
+            'premium_driving_analysis': bool(self.premium_driving_analysis),
+            'premium_seasonal': bool(self.premium_seasonal),
+            'premium_smart_frequency': bool(self.premium_smart_frequency),
+            'last_notif_generation': self.last_notif_generation,
         }
 
 

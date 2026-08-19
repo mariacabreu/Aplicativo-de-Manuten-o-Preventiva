@@ -15,12 +15,32 @@ import { useFocusEffect } from '@react-navigation/native';
 import API_BASE_URL from '../../api';
 import BottomNav from '../NavBar/BottomNav';
 
+const safeParse = (value, fallback) => {
+  if (value === null || value === undefined) return fallback;
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+};
+
+const normalizeScan = (scan) => {
+  if (!scan) return null;
+  return {
+    ...scan,
+    dtc_codes: safeParse(scan.dtc_codes, []),
+    live_data: safeParse(scan.live_data, {}),
+  };
+};
+
 const OBDHistoryScreen = ({ navigation, route }) => {
   const loggedUser = route.params?.user;
 
   const [vehicle, setVehicle] = useState(null);
   const [scans, setScans] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [expandedId, setExpandedId] = useState(null);
   const [analyzingId, setAnalyzingId] = useState(null);
   const [analysisData, setAnalysisData] = useState({}); // key: scanId, value: analysis data
@@ -29,29 +49,36 @@ const OBDHistoryScreen = ({ navigation, route }) => {
     fetchVehicleAndScans();
   }, []);
 
-  const fetchVehicleAndScans = async () => {
+  const fetchVehicleAndScans = async (isRefresh = false) => {
     try {
-      setLoading(true);
+      if (isRefresh) setRefreshing(true); else setLoading(true);
       const userId = loggedUser?.id || 1;
-      const statusResponse = await axios.get(`${API_BASE_URL}/user/status/${userId}`);
+      const statusResponse = await axios.get(`${API_BASE_URL}/user/status/${userId}`, { timeout: 20000 });
 
-      if (!statusResponse.data.vehicle) {
+      let v = null;
+      if (statusResponse.data?.vehicle) v = statusResponse.data.vehicle;
+      else if (Array.isArray(statusResponse.data?.vehicles) && statusResponse.data.vehicles.length > 0) v = statusResponse.data.vehicles[0];
+
+      if (!v) {
         setVehicle(null);
         setScans([]);
         return;
       }
 
-      setVehicle(statusResponse.data.vehicle);
+      setVehicle(v);
 
       const scansResponse = await axios.get(
-        `${API_BASE_URL}/vehicle/obd-scans/${statusResponse.data.vehicle.id}`
+        `${API_BASE_URL}/vehicle/obd-scans/${v.id}`,
+        { timeout: 20000 }
       );
-      setScans(scansResponse.data.scans || []);
+      const rawScans = Array.isArray(scansResponse.data?.scans) ? scansResponse.data.scans : [];
+      setScans(rawScans.map(normalizeScan).filter(Boolean));
     } catch (error) {
       console.error('Erro ao buscar histórico de scanner:', error);
       setScans([]);
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   };
 
@@ -95,13 +122,21 @@ const OBDHistoryScreen = ({ navigation, route }) => {
   const handleAnalyzeScan = async (scanId) => {
     try {
       setAnalyzingId(scanId);
-      const response = await axios.get(`${API_BASE_URL}/vehicle/obd-scan/analyze/${scanId}`);
+      const response = await axios.get(`${API_BASE_URL}/vehicle/obd-scan/analyze/${scanId}`, { timeout: 60000 });
+      const data = response.data || {};
+      const analysisStr = typeof data.analysis === 'string' ? data.analysis : null;
+      const recs = Array.isArray(data.recommendations) ? data.recommendations : [];
+      const abn = Array.isArray(data.abnormal_values) ? data.abnormal_values : [];
       setAnalysisData(prev => ({
         ...prev,
-        [scanId]: response.data
+        [scanId]: {
+          analysis: analysisStr,
+          recommendations: recs,
+          abnormal_values: abn,
+        }
       }));
     } catch (err) {
-      console.error('Erro ao analisar scan:', err);
+      console.error('Erro ao analisar scan:', err?.message || err);
     } finally {
       setAnalyzingId(null);
     }
@@ -120,23 +155,44 @@ const OBDHistoryScreen = ({ navigation, route }) => {
       { key: 'engineLoad', label: 'Carga do Motor', unit: '%', icon: 'car-battery' },
       { key: 'throttlePosition', label: 'Acelerador', unit: '%', icon: 'engine' },
       { key: 'intakeManifoldPressure', label: 'Pressão Coletor', unit: ' kPa', icon: 'gauge' },
-      { key: 'ambientTemp', label: 'Temp. Ambiente', unit: '°C', icon: 'weather-sunny' }
+      { key: 'ambientTemp', label: 'Temp. Ambiente', unit: '°C', icon: 'weather-sunny' },
+      { key: 'airIntakeTemp', label: 'Temp. Ar Adm.', unit: '°C', icon: 'oil' },
+      { key: 'maf', label: 'Fluxo Ar (MAF)', unit: ' g/s', icon: 'weather-windy' },
+      { key: 'batteryVoltage', label: 'Tensão Bateria', unit: ' V', icon: 'car-battery' },
+      { key: 'fuelPressure', label: 'Pressão Comb.', unit: ' kPa', icon: 'fire' },
+      { key: 'oilTemp', label: 'Temp. Óleo', unit: '°C', icon: 'thermometer-lines' },
+      { key: 'lambda', label: 'Sonda Lambda', unit: ' λ', icon: 'omega' },
+      { key: 'timingAdvance', label: 'Avanço Ignição', unit: '°', icon: 'clock-fast' },
+      { key: 'egr', label: 'EGR', unit: '%', icon: 'valve' },
+      { key: 'evapSystemVaporPressure', label: 'Pressão Evap.', unit: ' Pa', icon: 'waves' },
+      { key: 'catalystTemp', label: 'Temp. Catalis.', unit: '°C', icon: 'fireplace' },
+      { key: 'fuelTrimShort', label: 'Ajuste Curto', unit: '%', icon: 'tune' },
+      { key: 'fuelTrimLong', label: 'Ajuste Longo', unit: '%', icon: 'tune-variant' },
+      { key: 'fuelEfficiency', label: 'Eficiência', unit: ' km/L', icon: 'speedometer-slow' },
+      { key: 'co2Emission', label: 'CO₂', unit: ' g/km', icon: 'smog' },
     ];
+
+    const rendered = items.filter((item) => {
+      const v = liveData[item.key];
+      return v !== undefined && v !== null && v !== 'N/D' && !(typeof v === 'number' && Number.isNaN(v));
+    });
+
+    if (rendered.length === 0) {
+      return <Text style={styles.noConditionText}>Nenhuma condição registrada neste scan.</Text>;
+    }
 
     return (
       <View style={styles.conditionGrid}>
-        {items
-          .filter((item) => liveData[item.key] !== undefined && liveData[item.key] !== null)
-          .map((item) => (
-            <View key={item.key} style={styles.conditionCard}>
-              <MaterialCommunityIcons name={item.icon} size={18} color="#FFCF00" />
-              <Text style={styles.conditionValue}>
-                {liveData[item.key]}
-                {item.unit}
-              </Text>
-              <Text style={styles.conditionLabel}>{item.label}</Text>
-            </View>
-          ))}
+        {rendered.map((item) => (
+          <View key={item.key} style={styles.conditionCard}>
+            <MaterialCommunityIcons name={item.icon} size={18} color="#FFCF00" />
+            <Text style={styles.conditionValue}>
+              {liveData[item.key]}
+              {item.unit}
+            </Text>
+            <Text style={styles.conditionLabel}>{item.label}</Text>
+          </View>
+        ))}
       </View>
     );
   };
@@ -160,6 +216,17 @@ const OBDHistoryScreen = ({ navigation, route }) => {
             </Text>
           )}
         </View>
+        <TouchableOpacity
+          onPress={() => fetchVehicleAndScans(true)}
+          disabled={loading || refreshing}
+          style={[styles.refreshButton, (loading || refreshing) && { opacity: 0.5 }]}
+        >
+          {refreshing ? (
+            <ActivityIndicator size="small" color="#000" />
+          ) : (
+            <MaterialCommunityIcons name="refresh" size={22} color="#000" />
+          )}
+        </TouchableOpacity>
       </View>
 
       <ScrollView
@@ -365,6 +432,17 @@ const styles = StyleSheet.create({
     width: 40,
     zIndex: 2,
     alignSelf: 'flex-start'
+  },
+  refreshButton: {
+    width: 40,
+    height: 40,
+    marginLeft: 'auto',
+    borderRadius: 20,
+    backgroundColor: '#FFCF00',
+    alignItems: 'center',
+    justifyContent: 'center',
+    alignSelf: 'flex-start',
+    zIndex: 2,
   },
   logoContainer: {
     position: 'absolute',
