@@ -1,7 +1,11 @@
 # Aplicativo-de-Manuten-o-Preventiva
 
-backend - py -m pip install flask flask-sqlalchemy flask-cors openai python-dotenv
-backend - py app.py
+BACKEND
+cd c:\Users\User\Downloads\AMP\backend
+$env:PYTHONIOENCODING="utf-8"
+& "C:\Users\User\AppData\Local\Python\bin\python.exe" run.py
+
+
 
 frontend - npm install
 frontend - npm start
